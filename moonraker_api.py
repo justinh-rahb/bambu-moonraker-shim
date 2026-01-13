@@ -2,6 +2,8 @@ import asyncio
 import json
 import time
 import uuid
+import os
+import tempfile
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, UploadFile, File
 from fastapi.responses import JSONResponse
@@ -9,6 +11,7 @@ from state_manager import state_manager
 from bambu_client import bambu_client
 from config import Config
 from database_manager import database_manager
+from ftps_client import ftps_client
 
 router = APIRouter()
 
@@ -118,21 +121,76 @@ async def file_list(root: str = "gcodes"):
     if root == "config":
         return success_response([])
 
-    # Mock file list for MVP
-    # In real impl, we'd list local files or query printer
-    files = [
-        {"path": "gcodes/benchy.gcode", "size": 123456, "modified": time.time()},
-        {"path": "gcodes/calibration.gcode", "size": 65432, "modified": time.time()},
-    ]
-    return success_response(files)
+    try:
+        # List files from printer via FTPS
+        remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
+        
+        # Filter to only show gcode files (not directories)
+        # Mainsail expects a flat list with "path" starting with "gcodes/"
+        files = []
+        for f in remote_files:
+            if not f["is_dir"]:
+                # Filter by extension if desired
+                name = f["name"]
+                if name.endswith((".gcode", ".gcode.3mf", ".3mf")):
+                    files.append({
+                        "path": f"gcodes/{name}",
+                        "size": f["size"],
+                        "modified": f["modified"]
+                    })
+        
+        return success_response(files)
+    except Exception as e:
+        print(f"Error listing files: {e}")
+        # Return empty list on error rather than failing
+        return success_response([])
 
 
 @router.post("/server/files/upload")
 async def file_upload(file: UploadFile = File(...), path: str = None):
-    # Dummy upload
-    return success_response(
-        {"item": {"path": f"gcodes/{file.filename}", "size": 0}, "print_started": False}
-    )
+    try:
+        # Save uploaded file to a temp location first
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".gcode")
+        try:
+            # Write the uploaded file to temp
+            with os.fdopen(temp_fd, 'wb') as tmp:
+                content = await file.read()
+                tmp.write(content)
+            
+            # Upload to printer via FTPS
+            ftps_client.upload_file(temp_path, file.filename)
+            
+            # Get file size
+            file_size = len(content)
+            
+            return success_response({
+                "item": {
+                    "path": f"gcodes/{file.filename}",
+                    "size": file_size,
+                    "modified": time.time()
+                },
+                "print_started": False
+            })
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+    except Exception as e:
+        print(f"Upload error: {e}")
+        return error_response(500, f"Upload failed: {str(e)}")
+
+
+
+
+@router.delete("/server/files/gcodes/{filename:path}")
+async def file_delete(filename: str):
+    """Delete a file from the printer via FTPS."""
+    try:
+        ftps_client.delete_file(filename)
+        return success_response("ok")
+    except Exception as e:
+        print(f"Delete error: {e}")
+        return error_response(500, f"Delete failed: {str(e)}")
 
 
 @router.get("/server/files/{root}/{path:path}")
