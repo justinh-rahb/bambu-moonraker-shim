@@ -59,9 +59,77 @@ async def main():
     try:
         await test_http_info()
         await test_websocket_flow()
+        await test_database_endpoints()
+        await test_missing_ws_methods()
         print("\n✅ Verification Passed!")
     except Exception as e:
         print(f"\n❌ Verification Failed: {e}")
+
+async def test_missing_ws_methods():
+    print(f"\nTesting generic WS methods...")
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(f"{BASE_URL}/websocket") as ws:
+            # Consume initial greeting
+            await ws.receive_json()
+
+            # 1. server.temperature_store
+            req = {"jsonrpc": "2.0", "method": "server.temperature_store", "id": 2}
+            await ws.send_json(req)
+            resp = await ws.receive_json()
+            # Skip notifications if they come effectively
+            while resp.get("method") == "notify_status_update":
+                 resp = await ws.receive_json()
+
+            print(f"Temperature Store: {resp}")
+            assert resp["id"] == 2
+            assert "temperatures" in resp["result"]
+
+            # 2. server.files.metadata
+            req = {"jsonrpc": "2.0", "method": "server.files.metadata", "params": {"filename": "test.gcode"}, "id": 3}
+            await ws.send_json(req)
+            resp = await ws.receive_json()
+            # Skip notifications
+            while resp.get("method") == "notify_status_update":
+                 resp = await ws.receive_json()
+                 
+            print(f"Files Metadata: {resp}")
+            assert resp["id"] == 3
+            assert resp["result"]["filename"] == "test.gcode"
+
+            # 3. server.gcode_store
+            req = {"jsonrpc": "2.0", "method": "server.gcode_store", "id": 4}
+            await ws.send_json(req)
+            resp = await ws.receive_json()
+            # Skip notifications
+            while resp.get("method") == "notify_status_update":
+                 resp = await ws.receive_json()
+            print(f"Gcode Store: {resp}")
+            assert resp["id"] == 4
+            assert "gcode_store" in resp["result"]
+            
+        print("WS methods tests passed")
+
+async def test_database_endpoints():
+    print(f"\nTesting Database Endpoints...")
+    async with aiohttp.ClientSession() as session:
+        # POST
+        data = {"namespace": "test_ns", "key": "test_key", "value": "test_val"}
+        async with session.post(f"{BASE_URL}/server/database/item", json=data) as resp:
+            print(f"POST Status: {resp.status}")
+            r = await resp.json()
+            print(f"POST Response: {r}")
+            assert resp.status == 200
+            assert r["result"]["value"] == "test_val"
+
+        # GET
+        async with session.get(f"{BASE_URL}/server/database/item?namespace=test_ns&key=test_key") as resp:
+            print(f"GET Status: {resp.status}")
+            r = await resp.json()
+            print(f"GET Response: {r}")
+            assert resp.status == 200
+            assert r["result"]["value"] == "test_val"
+            
+        print("Database tests passed")
 
 if __name__ == "__main__":
     asyncio.run(main())

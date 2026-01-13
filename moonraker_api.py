@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from state_manager import state_manager
 from bambu_client import bambu_client
 from config import Config
+from database_manager import database_manager
 
 router = APIRouter()
 
@@ -84,6 +85,9 @@ async def objects_query(request: Request):
 
 @router.get("/server/files/list")
 async def file_list(root: str = "gcodes"):
+    if root == "config":
+         return success_response([])
+
     # Mock file list for MVP
     # In real impl, we'd list local files or query printer
     files = [
@@ -99,6 +103,50 @@ async def file_upload(file: UploadFile = File(...), path: str = None):
         "item": { "path": f"gcodes/{file.filename}", "size": 0 },
         "print_started": False
     })
+
+@router.get("/server/files/{root}/{path:path}")
+async def file_download(root: str, path: str):
+    # Mocking theme files to avoid 404s for Mainsail
+    if root == "config" and ".theme" in path:
+        # Return empty JSON for theme files to satisfy Mainsail
+        return success_response({})
+    
+    # Generic 404 for now unless checked against real files
+    return error_response(404, "File not found")
+
+@router.get("/server/database/item")
+async def database_get(namespace: str, key: str = None):
+    # namespace is required, key is optional query param
+    val = database_manager.get_item(namespace, key)
+    return success_response({"namespace": namespace, "key": key, "value": val})
+
+@router.post("/server/database/item")
+async def database_post(request: Request):
+    try:
+        body = await request.json()
+        namespace = body.get("namespace")
+        key = body.get("key")
+        value = body.get("value")
+        
+        if not namespace:
+            return error_response(400, "Namespace required")
+
+        new_val = database_manager.post_item(namespace, key, value)
+        return success_response({"namespace": namespace, "key": key, "value": new_val})
+    except Exception as e:
+        return error_response(400, str(e))
+
+@router.delete("/server/database/item")
+async def database_delete(request: Request):
+     # Delete usually comes as query params or body? Moonraker docs say DELETE method.
+     # FastAPI handles method. Query params likely.
+     namespace = request.query_params.get("namespace")
+     key = request.query_params.get("key")
+     if not namespace or not key:
+         return error_response(400, "Namespace and key required")
+     
+     val = database_manager.delete_item(namespace, key)
+     return success_response({"namespace": namespace, "key": key, "value": val})
 
 @router.post("/printer/print/start")
 async def print_start(request: Request):
@@ -220,6 +268,100 @@ async def handle_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 result_status[key] = current_state[key]
         response["result"] = {"status": result_status, "eventtime": time.time()}
         
+        response["result"] = {"status": result_status, "eventtime": time.time()}
+
+    elif method == "server.database.get_item":
+        namespace = request.get("params", {}).get("namespace")
+        key = request.get("params", {}).get("key")
+        val = database_manager.get_item(namespace, key)
+        response["result"] = {"namespace": namespace, "key": key, "value": val}
+
+    elif method == "server.database.post_item":
+        namespace = request.get("params", {}).get("namespace")
+        key = request.get("params", {}).get("key")
+        value = request.get("params", {}).get("value")
+        new_val = database_manager.post_item(namespace, key, value)
+        response["result"] = {"namespace": namespace, "key": key, "value": new_val}
+
+    elif method == "server.database.delete_item":
+        namespace = request.get("params", {}).get("namespace")
+        key = request.get("params", {}).get("key")
+        val = database_manager.delete_item(namespace, key)
+        response["result"] = {"namespace": namespace, "key": key, "value": val}
+
+    elif method == "server.temperature_store":
+        # Mock temperature store
+        response["result"] = {
+            "keys": ["extruder", "heater_bed"],
+            "min": 0,
+            "max": 300,
+            "temperatures": {
+                "extruder": [],
+                "heater_bed": []
+            } # Empty history for now
+        }
+
+    elif method == "server.files.metadata":
+        filename = request.get("params", {}).get("filename")
+        # Mock metadata
+        response["result"] = {
+            "filename": filename,
+            "size": 1234,
+            "modified": time.time(),
+            "slicer": "BambuStudio",
+            "slicer_version": "unknown",
+            "layer_height": 0.2,
+            "first_layer_height": 0.2,
+            "object_height": 10.0,
+            "filament_total": 1000.0,
+            "estimated_time": 3600,
+            "thumbnails": []
+        }
+        
+    elif method == "printer.info":
+        response["result"] = {
+            "state": "ready",
+            "hostname": "bambu-shim",
+            "model": "Bambu",
+            "firmware_version": "unknown",
+            "software_version": "bambu-moonraker-shim",
+            "cpu_info": "Mock CPU"
+        }
+
+    elif method == "server.connection.identify":
+        response["result"] = {
+            "connection_id": req_id
+        }
+
+    elif method == "server.gcode_store":
+        response["result"] = {"gcode_store": []}
+        
+    elif method == "server.webcams.list":
+        response["result"] = {"webcams": []}
+
+    elif method == "server.config":
+        response["result"] = {"config": {}}
+
+    elif method == "machine.system_info":
+         response["result"] = {
+            "system_info": {
+                "cpu": "unknown",
+                "python": "3.x",
+                "os": "mock_os"
+            }
+        }
+    
+    elif method == "machine.proc_stats":
+        response["result"] = {
+            "system_cpu_usage": {"cpu": 0.0},
+            "system_memory": {"available": 1000, "total": 2000, "used": 1000},
+            "websocket_connections": 1
+        }
+        
+    elif method == "server.database.list":
+         # Return empty list of namespaces or similar
+         response["result"] = {"namespaces": []}
+
     else:
         # Ignore unknown methods or return null result to avoid errors
         # Mainsail calls a lot of things we might not implement yet.
