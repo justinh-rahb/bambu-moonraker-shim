@@ -176,6 +176,17 @@ class BambuClient:
         }
         await self.publish_command(cmd)
 
+    async def send_gcode_line(self, gcode: str):
+        """Sends a raw G-code line to the printer."""
+        cmd = {
+            "print": {
+                "sequence_id": "0",
+                "command": "gcode_line",
+                "param": gcode
+            }
+        }
+        await self.publish_command(cmd)
+
     # --- Mock Mode ---
     async def _mock_loop(self):
         print("Starting Mock Bambu Printer loop...")

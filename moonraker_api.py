@@ -362,6 +362,19 @@ async def handle_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
          # Return empty list of namespaces or similar
          response["result"] = {"namespaces": []}
 
+    elif method == "printer.gcode.script":
+        script = request.get("params", {}).get("script", "")
+        # Mainsail functionality often depends on this returning successfully
+        # We split by newlines and send each as a separate command
+        lines = script.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line:
+                # Basic logging for now
+                print(f"Executing G-code: {line}")
+                await bambu_client.send_gcode_line(line)
+        response["result"] = "ok"
+
     else:
         # Ignore unknown methods or return null result to avoid errors
         # Mainsail calls a lot of things we might not implement yet.

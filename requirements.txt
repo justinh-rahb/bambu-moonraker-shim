@@ -4,3 +4,4 @@ aiomqtt
 python-multipart
 python-dotenv
 requests
+aiohttp

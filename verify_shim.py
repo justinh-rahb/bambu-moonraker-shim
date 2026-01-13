@@ -61,6 +61,7 @@ async def main():
         await test_websocket_flow()
         await test_database_endpoints()
         await test_missing_ws_methods()
+        await test_gcode_script()
         print("\n✅ Verification Passed!")
     except Exception as e:
         print(f"\n❌ Verification Failed: {e}")
@@ -107,7 +108,34 @@ async def test_missing_ws_methods():
             assert resp["id"] == 4
             assert "gcode_store" in resp["result"]
             
+            
         print("WS methods tests passed")
+
+async def test_gcode_script():
+    print(f"\nTesting printer.gcode.script...")
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(f"{BASE_URL}/websocket") as ws:
+            # Consume initial greeting
+            await ws.receive_json()
+
+            # Test printer.gcode.script
+            req = {
+                "jsonrpc": "2.0", 
+                "method": "printer.gcode.script", 
+                "params": {"script": "G28\nM140 S60"}, 
+                "id": 5
+            }
+            await ws.send_json(req)
+            resp = await ws.receive_json()
+            
+            # Skip notifications
+            while resp.get("method") == "notify_status_update":
+                 resp = await ws.receive_json()
+
+            print(f"Gcode Script: {resp}")
+            assert resp["id"] == 5
+            assert resp["result"] == "ok"
+    print("G-code script test passed")
 
 async def test_database_endpoints():
     print(f"\nTesting Database Endpoints...")
