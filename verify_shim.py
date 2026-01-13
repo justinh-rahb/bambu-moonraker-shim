@@ -63,6 +63,7 @@ async def main():
         await test_missing_ws_methods()
         await test_gcode_script()
         await test_configfile()
+        await test_webcams()
         print("\n✅ Verification Passed!")
     except Exception as e:
         print(f"\n❌ Verification Failed: {e}")
@@ -168,6 +169,82 @@ async def test_configfile():
 
     print("Configfile test passed")
 
+async def test_webcams():
+    print(f"\nTesting webcams...")
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(f"{BASE_URL}/websocket") as ws:
+            await ws.receive_json()
+
+            # 1. Add Webcam
+            req = {
+                "jsonrpc": "2.0", 
+                "method": "server.webcams.post_item", 
+                "params": {"name": "Test Cam", "stream_url": "http://test/stream"}, 
+                "id": 7
+            }
+            await ws.send_json(req)
+            resp = await ws.receive_json()
+            # Expect response to ID 7
+            while resp.get("id") != 7:
+                 print(f"Skipping notification: {resp.get('method')}")
+                 resp = await ws.receive_json()
+            
+            print(f"Add Webcam: {resp}")
+            
+            assert resp["id"] == 7
+            assert resp["result"]["item"]["name"] == "Test Cam"
+            assert resp["result"]["item"]["stream_url"] == "http://test/stream"
+            uid = resp["result"]["item"]["uid"]
+
+            # 2. Update Webcam
+            req = {
+                "jsonrpc": "2.0", 
+                "method": "server.webcams.post_item", 
+                "params": {"uid": uid, "name": "Updated Cam", "stream_url": "http://test/stream_v2"}, 
+                "id": 71
+            }
+            await ws.send_json(req)
+            resp = await ws.receive_json()
+            while resp.get("id") != 71: resp = await ws.receive_json()
+            
+            print(f"Update Webcam: {resp}")
+            assert resp["result"]["item"]["name"] == "Updated Cam"
+            assert resp["result"]["item"]["stream_url"] == "http://test/stream_v2"
+            assert resp["result"]["item"]["uid"] == uid
+
+            # 3. List Webcams
+            req = {"jsonrpc": "2.0", "method": "server.webcams.list", "id": 8}
+            await ws.send_json(req)
+            resp = await ws.receive_json()
+            while resp.get("id") != 8: resp = await ws.receive_json()
+
+            print(f"List Webcams: {resp}")
+            assert len(resp["result"]["webcams"]) >= 1
+            # Check for updated values
+            cam = next((c for c in resp["result"]["webcams"] if c["uid"] == uid), None)
+            assert cam is not None
+            assert cam["name"] == "Updated Cam"
+
+            # 4. Delete Webcam
+            req = {"jsonrpc": "2.0", "method": "server.webcams.delete_item", "params": {"uid": uid}, "id": 9}
+            await ws.send_json(req)
+            resp = await ws.receive_json()
+            while resp.get("id") != 9: resp = await ws.receive_json()
+            
+            print(f"Delete Webcam: {resp}")
+            assert resp["result"]["item"]["uid"] == uid
+
+            # 5. Verify Deletion
+            req = {"jsonrpc": "2.0", "method": "server.webcams.list", "id": 10}
+            await ws.send_json(req)
+            resp = await ws.receive_json()
+            while resp.get("id") != 10: resp = await ws.receive_json()
+            
+            # Should not contain the deleted uid
+            assert not any(c["uid"] == uid for c in resp["result"]["webcams"])
+
+    print("Webcam test passed")
+
 async def test_database_endpoints():
     print(f"\nTesting Database Endpoints...")
     async with aiohttp.ClientSession() as session:
@@ -188,6 +265,17 @@ async def test_database_endpoints():
             assert resp.status == 200
             assert r["result"]["value"] == "test_val"
             
+        # Database List
+        async with session.get(f"{BASE_URL}/server/database/list") as resp:
+            print(f"GET /server/database/list Status: {resp.status}")
+            r = await resp.json()
+            assert resp.status == 200
+            assert "namespaces" in r["result"]
+            assert "backups" in r["result"]
+            print(f"Namespaces: {r['result']['namespaces']}")
+            assert len(r["result"]["namespaces"]) > 0
+            assert isinstance(r["result"]["backups"], list)
+
         print("Database tests passed")
 
 if __name__ == "__main__":

@@ -22,6 +22,21 @@ def error_response(code: int, message: str) -> JSONResponse:
         content={"error": {"code": code, "message": message}}
     )
 
+def flatten_to_nested(flat_dict: dict) -> dict:
+    """Convert flat dotted keys to nested dict structure.
+    E.g., {"dashboard.layout": []} -> {"dashboard": {"layout": []}}
+    """
+    nested = {}
+    for key, value in flat_dict.items():
+        parts = key.split('.')
+        current = nested
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+        current[parts[-1]] = value
+    return nested
+
 # --- HTTP Endpoints ---
 
 @router.get("/server/info")
@@ -29,7 +44,7 @@ async def server_info():
     return success_response({
         "state": "ready",
         "klippy_state": "ready",
-        "components": ["printer", "websocket"],
+        "components": ["printer", "websocket", "database", "file_manager", "webcams"],
         "version": "v0.0.1-bambu-shim",
         "api_version": [1, 0, 0]
     })
@@ -118,6 +133,9 @@ async def file_download(root: str, path: str):
 async def database_get(namespace: str, key: str = None):
     # namespace is required, key is optional query param
     val = database_manager.get_item(namespace, key)
+    # Convert flat dotted keys to nested structure for mainsail namespace
+    if namespace == "mainsail" and key is None and isinstance(val, dict):
+        val = flatten_to_nested(val)
     return success_response({"namespace": namespace, "key": key, "value": val})
 
 @router.post("/server/database/item")
@@ -147,6 +165,11 @@ async def database_delete(request: Request):
      
      val = database_manager.delete_item(namespace, key)
      return success_response({"namespace": namespace, "key": key, "value": val})
+
+@router.get("/server/database/list")
+async def database_list():
+    namespaces = database_manager.get_namespaces()
+    return success_response({"namespaces": namespaces, "backups": []})
 
 @router.post("/printer/print/start")
 async def print_start(request: Request):
@@ -233,6 +256,8 @@ async def handle_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = request.get("id")
     method = request.get("method")
     
+    print(f"RPC Request: {method} params={request.get('params')}")
+
     response = {
         "jsonrpc": "2.0",
         "id": req_id
@@ -240,8 +265,11 @@ async def handle_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     
     if method == "server.info":
         response["result"] = {
+            "state": "ready",
             "klippy_state": "ready",
-            "version": "v0.0.1-bambu-shim"
+            "components": ["printer", "websocket", "database", "file_manager", "webcams"],
+            "version": "v0.0.1-bambu-shim",
+            "api_version": [1, 0, 0]
         }
     elif method == "printer.objects.list":
         keys = list(state_manager.get_state().keys())
@@ -273,15 +301,30 @@ async def handle_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     elif method == "server.database.get_item":
         namespace = request.get("params", {}).get("namespace")
         key = request.get("params", {}).get("key")
-        val = database_manager.get_item(namespace, key)
+        
+        # Block maintenance reads - return empty to prevent UI errors
+        if namespace == "maintenance":
+            val = {}
+        else:
+            val = database_manager.get_item(namespace, key)
+            # Convert flat dotted keys to nested structure for mainsail namespace
+            # This is required because Mainsail's setDataDeep expects nested objects
+            if namespace == "mainsail" and key is None and isinstance(val, dict):
+                val = flatten_to_nested(val)
+        
         response["result"] = {"namespace": namespace, "key": key, "value": val}
 
     elif method == "server.database.post_item":
         namespace = request.get("params", {}).get("namespace")
         key = request.get("params", {}).get("key")
         value = request.get("params", {}).get("value")
-        new_val = database_manager.post_item(namespace, key, value)
-        response["result"] = {"namespace": namespace, "key": key, "value": new_val}
+        
+        # Block maintenance writes - Mainsail creates incomplete entries that break the UI
+        if namespace == "maintenance":
+            response["result"] = {"namespace": namespace, "key": key, "value": value}
+        else:
+            new_val = database_manager.post_item(namespace, key, value)
+            response["result"] = {"namespace": namespace, "key": key, "value": new_val}
 
     elif method == "server.database.delete_item":
         namespace = request.get("params", {}).get("namespace")
@@ -337,7 +380,86 @@ async def handle_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         response["result"] = {"gcode_store": []}
         
     elif method == "server.webcams.list":
-        response["result"] = {"webcams": []}
+        # Retrieve webcams from database
+        # We'll store them in namespace "moonraker", key "webcams" as a list
+        webcams = database_manager.get_item("moonraker", "webcams")
+        if not webcams:
+            webcams = []
+        response["result"] = {"webcams": webcams}
+    
+    elif method == "server.webcams.post_item":
+        params = request.get("params", {})
+        # Load existing
+        webcams = database_manager.get_item("moonraker", "webcams") or []
+        
+        uid = params.get("uid")
+        target_cam = None
+        
+        # Check if updating existing
+        if uid:
+            for cam in webcams:
+                if cam["uid"] == uid:
+                    target_cam = cam
+                    break
+        
+        if target_cam:
+            # Update existing
+            target_cam.update({
+                "name": params.get("name", target_cam.get("name")),
+                "location": params.get("location", target_cam.get("location")),
+                "service": params.get("service", target_cam.get("service")),
+                "target_fps": params.get("target_fps", target_cam.get("target_fps")),
+                "stream_url": params.get("stream_url", target_cam.get("stream_url", "")),
+                "snapshot_url": params.get("snapshot_url", target_cam.get("snapshot_url", "")),
+                "flip_horizontal": params.get("flip_horizontal", target_cam.get("flip_horizontal")),
+                "flip_vertical": params.get("flip_vertical", target_cam.get("flip_vertical")),
+                "rotation": params.get("rotation", target_cam.get("rotation")),
+                "enabled": params.get("enabled", target_cam.get("enabled", True))
+            })
+            # Handle potential legacy keys if needed, but standardizing on stream_url/snapshot_url
+            new_cam = target_cam
+        else:
+            # New webcam
+            uid = str(uuid.uuid4())
+            new_cam = {
+                "name": params.get("name", "New Webcam"),
+                "location": params.get("location", "printer"),
+                "service": params.get("service", "mjpegstreamer"),
+                "target_fps": params.get("target_fps", 15),
+                "stream_url": params.get("stream_url", ""),
+                "snapshot_url": params.get("snapshot_url", ""),
+                "flip_horizontal": params.get("flip_horizontal", False),
+                "flip_vertical": params.get("flip_vertical", False),
+                "rotation": params.get("rotation", 0),
+                "source": "database",
+                "uid": uid,
+                "enabled": True
+            }
+            webcams.append(new_cam)
+            
+        database_manager.post_item("moonraker", "webcams", webcams)
+        
+        await notify_webcams_changed()
+        response["result"] = {"item": new_cam}
+
+    elif method == "server.webcams.delete_item":
+        uid = request.get("params", {}).get("uid")
+        webcams = database_manager.get_item("moonraker", "webcams") or []
+        
+        # Filter out the one to delete
+        new_list = [cam for cam in webcams if cam["uid"] != uid]
+        
+        if len(new_list) < len(webcams):
+             database_manager.post_item("moonraker", "webcams", new_list)
+             await notify_webcams_changed()
+             response["result"] = {"item": {"uid": uid}} # Return deleted ID
+        else:
+             # Item not found, but successful deletion (idempotent)
+             response["result"] = {"item": {"uid": uid}}
+
+    elif method == "server.webcams.test":
+        # Just return ok for now
+        response["result"] = {"can_stream": True}
 
     elif method == "server.config":
         response["result"] = {"config": {}}
@@ -359,8 +481,8 @@ async def handle_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         }
         
     elif method == "server.database.list":
-         # Return empty list of namespaces or similar
-         response["result"] = {"namespaces": []}
+         namespaces = database_manager.get_namespaces()
+         response["result"] = {"namespaces": namespaces, "backups": []}
 
     elif method == "printer.gcode.script":
         script = request.get("params", {}).get("script", "")
@@ -381,4 +503,13 @@ async def handle_jsonrpc(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         print(f"Unknown WS method: {method}")
         response["result"] = {} # Safe fallback
 
+    print(f"RPC Response: {json.dumps(response)}")
     return response
+
+async def notify_webcams_changed():
+    webcams = database_manager.get_item("moonraker", "webcams") or []
+    await manager.broadcast({
+        "jsonrpc": "2.0",
+        "method": "notify_webcams_changed",
+        "params": {"webcams": webcams}
+    })
