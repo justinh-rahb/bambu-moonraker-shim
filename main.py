@@ -30,4 +30,4 @@ async def root():
     return {"message": "Bambu Moonraker Shim is running"}
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=Config.HTTP_PORT, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=Config.HTTP_PORT, reload=True, ws_ping_interval=None, ws_ping_timeout=300)
