@@ -140,7 +140,7 @@ class BambuClient:
     async def publish_command(self, command: Dict[str, Any]):
         """Sends a JSON command to the printer request topic."""
         if not self._mqtt_client or not self.connected:
-            print("Cannot send command: MQTT disconneced.")
+            print("Cannot send command: MQTT disconnected.")
             return
 
         topic = f"device/{self.serial}/request"
