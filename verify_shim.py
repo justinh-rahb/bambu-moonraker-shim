@@ -62,6 +62,7 @@ async def main():
         await test_database_endpoints()
         await test_missing_ws_methods()
         await test_gcode_script()
+        await test_configfile()
         print("\n✅ Verification Passed!")
     except Exception as e:
         print(f"\n❌ Verification Failed: {e}")
@@ -136,6 +137,36 @@ async def test_gcode_script():
             assert resp["id"] == 5
             assert resp["result"] == "ok"
     print("G-code script test passed")
+
+async def test_configfile():
+    print(f"\nTesting configfile...")
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(f"{BASE_URL}/websocket") as ws:
+            # Consume initial greeting
+            await ws.receive_json()
+
+            # Query configfile
+            req = {
+                "jsonrpc": "2.0", 
+                "method": "printer.objects.query", 
+                "params": {"objects": {"configfile": None}}, 
+                "id": 6
+            }
+            await ws.send_json(req)
+            resp = await ws.receive_json()
+            
+            # Skip notifications
+            while resp.get("method") == "notify_status_update":
+                 resp = await ws.receive_json()
+
+            print(f"Configfile: {resp}")
+            assert resp["id"] == 6
+            assert "configfile" in resp["result"]["status"]
+            assert "settings" in resp["result"]["status"]["configfile"]
+            assert "extruder" in resp["result"]["status"]["configfile"]["settings"]
+            assert "virtual_sdcard" in resp["result"]["status"]["configfile"]["settings"]
+
+    print("Configfile test passed")
 
 async def test_database_endpoints():
     print(f"\nTesting Database Endpoints...")

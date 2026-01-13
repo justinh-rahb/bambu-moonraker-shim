@@ -5,14 +5,73 @@ from typing import Dict, Any, List, Optional
 class StateManager:
     def __init__(self):
         self._state: Dict[str, Any] = {
-            "extruder": {"temperature": 0.0, "target": 0.0},
-            "heater_bed": {"temperature": 0.0, "target": 0.0},
+            "extruder": {"temperature": 0.0, "target": 0.0, "power": 0.0, "pressure_advance": 0.0, "smooth_time": 0.0},
+            "heater_bed": {"temperature": 0.0, "target": 0.0, "power": 0.0},
             "print_stats": {
                 "state": "standby", # standby, printing, paused, complete, error, cancelling
                 "filename": "",
                 "print_duration": 0.0,
                 "total_duration": 0.0,
                 "filament_used": 0.0,
+            },
+            "toolhead": {
+                "position": [0.0, 0.0, 0.0],
+                "status": "Ready",
+                "homed_axes": "xyz",
+                "max_velocity": 500.0,
+                "max_accel": 3000.0,
+                "max_accel_to_decel": 1500.0,
+                "square_corner_velocity": 5.0,
+            },
+            "configfile": {
+                "settings": {
+                    "printer": {
+                        "kinematics": "corexy",
+                        "max_velocity": 500,
+                        "max_accel": 10000
+                    },
+                    "extruder": {
+                        "min_temp": 0,
+                        "max_temp": 300,
+                        "nozzle_diameter": 0.4
+                    },
+                    "heater_bed": {
+                        "min_temp": 0,
+                        "max_temp": 120
+                    },
+                    "virtual_sdcard": {
+                        "path": "/tmp/gcodes"
+                    },
+                    "pause_resume": {},
+                    "display_status": {},
+                    "gcode_macro pause": {},
+                    "gcode_macro resume": {},
+                    "gcode_macro cancel_print": {}
+                },
+                "config": {
+                     "printer": {
+                        "kinematics": "corexy",
+                        "max_velocity": "500",
+                        "max_accel": "10000"
+                    },
+                    "extruder": {
+                        "min_temp": "0",
+                        "max_temp": "300",
+                        "nozzle_diameter": "0.4"
+                    },
+                    "heater_bed": {
+                        "min_temp": "0",
+                        "max_temp": "120"
+                    },
+                    "virtual_sdcard": {
+                        "path": "/tmp/gcodes"
+                    },
+                    "pause_resume": {},
+                    "display_status": {},
+                    "gcode_macro pause": {},
+                    "gcode_macro resume": {},
+                    "gcode_macro cancel_print": {}
+                }
             },
             "virtual_sdcard": {
                 "progress": 0.0,
