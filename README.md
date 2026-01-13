@@ -62,6 +62,15 @@ BAMBU_MODE=local            # 'local' (LAN) or 'cloud' (not fully tested)
 HTTP_PORT=7125              # Standard Moonraker Port
 LOG_LEVEL=INFO
 GCODES_DIR=gcodes           # Directory to store uploaded gcodes
+
+# FTPS Config (file management)
+FTPS_PORT=990
+FTPS_USER=bblp
+FTPS_PASSWORD=12345678      # Defaults to BAMBU_ACCESS_CODE when unset
+FTPS_BASE_DIR=/
+FTPS_VERIFY_CERT=false
+FTPS_TIMEOUT=20
+FTPS_ALLOWED_EXTENSIONS=.gcode,.gcode.3mf,.3mf
 ```
 
 ## Usage
@@ -84,7 +93,7 @@ GCODES_DIR=gcodes           # Directory to store uploaded gcodes
 ## Limitations / TODO
 
 - **No full G-Code support**: You cannot send raw G-code commands via the console yet.
-- **File Management**: File management is currently local to the shim, not synced with the printer's SD card.
+- **File Management**: File upload/listing uses FTPS; printing via file selection may still depend on model/firmware behavior.
 - **Webcams**: No webcam stream bridging is implemented yet.
 - **Macros**: Klipper macros are not supported.
 

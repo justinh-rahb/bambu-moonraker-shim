@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import time
 import uuid
 from typing import Dict, Any, List, Optional
@@ -9,6 +10,7 @@ from state_manager import state_manager
 from bambu_client import bambu_client
 from config import Config
 from database_manager import database_manager
+from ftps_client import ftps_client
 
 router = APIRouter()
 
@@ -38,6 +40,21 @@ def flatten_to_nested(flat_dict: dict) -> dict:
             current = current[part]
         current[parts[-1]] = value
     return nested
+
+
+def _extension_allowed(filename: str) -> bool:
+    lower_name = filename.lower()
+    return any(lower_name.endswith(ext) for ext in Config.FTPS_ALLOWED_EXTENSIONS)
+
+
+def _sanitize_filename(filename: str) -> str:
+    return os.path.basename(filename.strip().replace("\\", "/"))
+
+
+def _map_gcodes_path(path: str) -> str:
+    if not path.startswith("gcodes/"):
+        raise ValueError("Path must start with gcodes/")
+    return path[len("gcodes/"):]
 
 
 # --- HTTP Endpoints ---
@@ -118,20 +135,97 @@ async def file_list(root: str = "gcodes"):
     if root == "config":
         return success_response([])
 
-    # Mock file list for MVP
-    # In real impl, we'd list local files or query printer
-    files = [
-        {"path": "gcodes/benchy.gcode", "size": 123456, "modified": time.time()},
-        {"path": "gcodes/calibration.gcode", "size": 65432, "modified": time.time()},
-    ]
+    if root != "gcodes":
+        return success_response([])
+
+    try:
+        entries = ftps_client.list_dir(".")
+    except Exception as exc:
+        return error_response(502, f"FTPS list failed: {exc}")
+    files = []
+    now = int(time.time())
+    for entry in entries:
+        if entry.is_dir:
+            continue
+        if not _extension_allowed(entry.name):
+            continue
+        files.append(
+            {
+                "path": f"gcodes/{entry.name}",
+                "size": entry.size or 0,
+                "modified": entry.modified or now,
+            }
+        )
     return success_response(files)
 
 
 @router.post("/server/files/upload")
 async def file_upload(file: UploadFile = File(...), path: str = None):
-    # Dummy upload
+    filename = _sanitize_filename(file.filename or "")
+    if not filename:
+        return error_response(400, "Filename required")
+    if not _extension_allowed(filename):
+        return error_response(400, "Unsupported file extension")
+
+    file.file.seek(0, os.SEEK_END)
+    file_size = file.file.tell()
+    file.file.seek(0, os.SEEK_SET)
+    try:
+        ftps_client.upload(file.file, filename)
+        metadata = ftps_client.stat(filename)
+    except Exception as exc:
+        return error_response(502, f"FTPS upload failed: {exc}")
     return success_response(
-        {"item": {"path": f"gcodes/{file.filename}", "size": 0}, "print_started": False}
+        {
+            "item": {
+                "path": f"gcodes/{metadata.name}",
+                "size": metadata.size or file_size,
+                "modified": metadata.modified or int(time.time()),
+            },
+            "print_started": False,
+        }
+    )
+
+
+@router.delete("/server/files/delete")
+async def file_delete(path: str):
+    try:
+        filename = _map_gcodes_path(path)
+    except ValueError:
+        return error_response(400, "Invalid file path")
+    if not filename:
+        return error_response(400, "Filename required")
+    try:
+        ftps_client.delete(filename)
+    except Exception as exc:
+        return error_response(502, f"FTPS delete failed: {exc}")
+    return success_response("ok")
+
+
+@router.get("/server/files/metadata")
+async def file_metadata(filename: str):
+    if filename.startswith("gcodes/"):
+        filename = filename[len("gcodes/"):]
+    if not filename:
+        return error_response(400, "Filename required")
+    try:
+        metadata = ftps_client.stat(filename)
+    except Exception as exc:
+        return error_response(502, f"FTPS metadata failed: {exc}")
+    return success_response(
+        {
+            "filename": filename,
+            "size": metadata.size or 0,
+            "modified": metadata.modified or int(time.time()),
+            "slicer": "BambuStudio",
+            "slicer_version": "unknown",
+            "layer_height": 0.2,
+            "first_layer_height": 0.2,
+            "object_height": 10.0,
+            "filament_total": 1000.0,
+            "estimated_time": 3600,
+            "thumbnails": [],
+        }
     )
 
 
