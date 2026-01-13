@@ -60,5 +60,10 @@ class DatabaseManager:
                 return  self._db[namespace]
         return None
 
+        return None
+
+    def get_namespaces(self):
+        return list(self._db.keys())
+
 # Global instance
 database_manager = DatabaseManager()
