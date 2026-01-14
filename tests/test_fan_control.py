@@ -12,6 +12,12 @@ class FanControlTests(unittest.TestCase):
         command = build_fan_command("chamber", 0)
         self.assertEqual(command.gcode, "M106 P3 S0\n")
 
+    def test_fan_generic_aliases(self):
+        command = build_fan_command("fan_generic aux", 64)
+        self.assertEqual(command.gcode, "M106 P2 S64\n")
+        command = build_fan_command("fan_generic chamber", 32)
+        self.assertEqual(command.gcode, "M106 P3 S32\n")
+
     def test_speed_boundaries(self):
         self.assertEqual(normalize_fan_speed(-5), 0)
         self.assertEqual(normalize_fan_speed(255), 255)

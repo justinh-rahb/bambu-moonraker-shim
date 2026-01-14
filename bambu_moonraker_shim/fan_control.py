@@ -15,12 +15,17 @@ FAN_ALIASES: Dict[str, FanTarget] = {
     "part": FanTarget.PART,
     "part_cooling": FanTarget.PART,
     "toolhead": FanTarget.PART,
+    "fan": FanTarget.PART,
     "aux": FanTarget.AUX,
     "auxiliary": FanTarget.AUX,
+    "fan_aux": FanTarget.AUX,
+    "fan_generic aux": FanTarget.AUX,
     "chamber": FanTarget.CHAMBER,
     "rear": FanTarget.CHAMBER,
     "case": FanTarget.CHAMBER,
     "exhaust": FanTarget.CHAMBER,
+    "fan_chamber": FanTarget.CHAMBER,
+    "fan_generic chamber": FanTarget.CHAMBER,
 }
 
 FAN_CHANNELS: Dict[FanTarget, int] = {
