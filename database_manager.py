@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 class DatabaseManager:
     def __init__(self, db_path: str = "moonraker.json"):
@@ -64,6 +64,15 @@ class DatabaseManager:
 
     def get_namespaces(self):
         return list(self._db.keys())
+
+    def ensure_namespaces(self, namespaces: Iterable[str]):
+        updated = False
+        for namespace in namespaces:
+            if namespace not in self._db:
+                self._db[namespace] = {}
+                updated = True
+        if updated:
+            self._save()
 
     def ensure_temperature_panel(self):
         def ensure_panel(layout_key: str):
