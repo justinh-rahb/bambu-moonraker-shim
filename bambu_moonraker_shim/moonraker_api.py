@@ -773,9 +773,16 @@ async def handle_jsonrpc(
         if command.target == FanTarget.PART:
             await state_manager.update_state({"fan": {"speed": speed_ratio}})
         elif command.target == FanTarget.AUX:
-            await state_manager.update_state({"fan_aux": {"speed": speed_ratio}})
+            await state_manager.update_state(
+                {"fan_generic aux": {"speed": speed_ratio}, "fan_aux": {"speed": speed_ratio}}
+            )
         elif command.target == FanTarget.CHAMBER:
-            await state_manager.update_state({"fan_chamber": {"speed": speed_ratio}})
+            await state_manager.update_state(
+                {
+                    "fan_generic chamber": {"speed": speed_ratio},
+                    "fan_chamber": {"speed": speed_ratio},
+                }
+            )
 
         response["result"] = "ok"
 

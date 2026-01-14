@@ -8,6 +8,8 @@ class StateManager:
             "extruder": {"temperature": 0.0, "target": 0.0, "power": 0.0, "pressure_advance": 0.0, "smooth_time": 0.0},
             "heater_bed": {"temperature": 0.0, "target": 0.0, "power": 0.0},
             "fan": {"speed": 0.0},
+            "fan_generic aux": {"speed": 0.0},
+            "fan_generic chamber": {"speed": 0.0},
             "fan_aux": {"speed": 0.0},
             "fan_chamber": {"speed": 0.0},
             "virtual_sdcard": {"progress": 0.0, "is_active": False, "file_position": 0},
@@ -116,6 +118,8 @@ class StateManager:
                 "progress": 0.0,
             },
             "fan": {"speed": 0.0},
+            "fan_generic aux": {"speed": 0.0},
+            "fan_generic chamber": {"speed": 0.0},
             "fan_aux": {"speed": 0.0},
             "fan_chamber": {"speed": 0.0},
             "output_pin caselight": {
