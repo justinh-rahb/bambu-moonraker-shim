@@ -108,6 +108,33 @@ def _join_moonraker_path(root: str, name: str) -> str:
     return f"{root.rstrip('/')}/{name}"
 
 
+def _build_file_list(root: str) -> List[Dict[str, Any]]:
+    if root == "config":
+        return _config_file_listing()
+
+    if root != "gcodes":
+        return []
+
+    # List files from printer via FTPS
+    remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
+
+    # Filter to only show gcode files (not directories)
+    # Mainsail expects a flat list with "path" starting with "gcodes/"
+    files = []
+    for f in remote_files:
+        if not f["is_dir"]:
+            # Filter by extension if desired
+            name = f["name"]
+            if name.endswith((".gcode", ".gcode.3mf", ".3mf")):
+                files.append({
+                    "path": _join_moonraker_path("gcodes", name),
+                    "size": f["size"],
+                    "modified": f["modified"]
+                })
+
+    return files
+
+
 @router.get("/access/oneshot_token")
 async def access_oneshot_token():
     token = secrets.token_urlsafe(32)
@@ -223,32 +250,13 @@ async def objects_query(request: Request):
 
 @router.get("/server/files/list")
 async def file_list(root: str = "gcodes"):
-    if root == "config":
-        return success_response(_config_file_listing())
-
     try:
-        # List files from printer via FTPS
-        remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
-        
-        # Filter to only show gcode files (not directories)
-        # Mainsail expects a flat list with "path" starting with "gcodes/"
-        files = []
-        for f in remote_files:
-            if not f["is_dir"]:
-                # Filter by extension if desired
-                name = f["name"]
-                if name.endswith((".gcode", ".gcode.3mf", ".3mf")):
-                    files.append({
-                        "path": f"gcodes/{name}",
-                        "size": f["size"],
-                        "modified": f["modified"]
-                    })
-        
-        return success_response(files)
+        files = _build_file_list(root)
+        return success_response({"root": root, "files": files})
     except Exception as e:
         print(f"Error listing files: {e}")
         # Return empty list on error rather than failing
-        return success_response([])
+        return success_response({"root": root, "files": []})
 
 
 @router.get("/server/files/directory")
@@ -857,6 +865,16 @@ async def handle_jsonrpc(
                 }
             ]
         }
+
+    elif method == "server.files.list":
+        params = request.get("params", {})
+        root = params.get("root", "gcodes")
+        try:
+            files = _build_file_list(root)
+            response["result"] = {"root": root, "files": files}
+        except Exception as e:
+            print(f"Error listing files: {e}")
+            response["result"] = {"root": root, "files": []}
 
     elif method == "server.files.get_directory":
         # Get file listing with caching
