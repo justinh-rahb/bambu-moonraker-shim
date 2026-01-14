@@ -51,17 +51,22 @@ Create a `.env` file in the root directory by copying the example or using the t
 
 ```bash
 # Bambu Printer Config
-BAMBU_HOST=192.168.1.100    # Printer IP Address
-BAMBU_ACCESS_CODE=12345678  # LAN Access Code (found on printer screen)
-BAMBU_SERIAL=01P00A12345678 # Printer Serial Number
+# Printer IP Address
+BAMBU_HOST=192.168.1.100
+# LAN Access Code (found on printer screen)
+BAMBU_ACCESS_CODE=12345678
+# Printer Serial Number
+BAMBU_SERIAL=01P00A12345678
 
 # Connection Mode
-BAMBU_MODE=local            # 'local' (LAN) or 'cloud' (not fully tested)
+# 'local' (LAN) or 'cloud' (not fully tested)
+BAMBU_MODE=local
 
 # Server Config
-HTTP_PORT=7125              # Standard Moonraker Port
+HTTP_PORT=7125
 LOG_LEVEL=INFO
-GCODES_DIR=gcodes           # Directory to store uploaded gcodes
+# Directory to store uploaded gcodes
+GCODES_DIR=gcodes
 ```
 
 ## Usage
@@ -80,6 +85,40 @@ GCODES_DIR=gcodes           # Directory to store uploaded gcodes
     - The port is `7125` by default, which Mainsail expects.
 
 3.  **Enjoy:** Mainsail should connect, show the printer as "Ready" or "Printing," and display temperatures.
+
+## Docker
+
+Build a container image that bundles this shim with a fully baked copy of the Mainsail UI (served via Nginx and proxied to the shim):
+
+```bash
+docker build -t bambu-moonraker-shim .
+```
+
+> **Tip:** Override the bundled UI by supplying build args, e.g. `docker build --build-arg MAINSAIL_VERSION=2.18.0 --build-arg MAINSAIL_SHA256=<sha> ...`.
+
+Run the image, providing your usual `.env` values (or individual `-e` flags). The container exposes port 80 for the combined UI+API surface:
+
+```bash
+docker run \
+    --env-file .env \
+    -p 8080:80 \
+    bambu-moonraker-shim
+```
+
+Open `http://localhost:8080` to access Mainsail. All API/WebSocket traffic is already proxied to the shim—no extra printer configuration inside Mainsail is required.
+
+### Networking (Bridge vs Host)
+
+The shim must reach `BAMBU_HOST` directly. If your Docker host can’t access the printer network from the default bridge, run the container in host mode:
+
+```bash
+docker run \
+    --env-file .env \
+    --network host \
+    bambu-moonraker-shim
+```
+
+With `--network host`, omit `-p` (nginx listens on port 80, the shim on 7125). If you stick with bridge mode, ensure the host can resolve the printer IP or set `--add-host printer:192.168.2.240` when you run the container.
 
 ## Limitations / TODO
 

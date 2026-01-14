@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+.env
+.venv/
+build/
+dist/
+.git/
+.gitignore
+Dockerfile
+.dockerignore
+moonraker.json
+bambu_shim.db
