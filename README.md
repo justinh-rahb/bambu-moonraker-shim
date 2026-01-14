@@ -16,6 +16,7 @@ This project allows you to use the beautiful Mainsail UI to monitor and control 
 - **Control**:
     - Pause, Resume, and Cancel prints.
     - Start prints (basic implementation).
+    - Fan control for part, aux, and chamber fans.
 - **Files**:
     - Basic file listing (mocked/local).
     - File upload (stubbed).
@@ -126,6 +127,18 @@ With `--network host`, omit `-p` (nginx listens on port 80, the shim on 7125). I
 - **File Management**: File management is currently local to the shim, not synced with the printer's SD card.
 - **Webcams**: No webcam stream bridging is implemented yet.
 - **Macros**: Klipper macros are not supported.
+
+## Fan Control
+
+The shim maps fan targets to Bambu's MQTT G-code format using the canonical names below:
+
+| Canonical fan | G-code    | Notes                  |
+| ------------ | --------- | ---------------------- |
+| `part`       | `M106 P1` | Toolhead part cooling  |
+| `aux`        | `M106 P2` | Auxiliary side fan     |
+| `chamber`    | `M106 P3` | Chamber/exhaust fan    |
+
+Fan speed values are clamped to `0..255`. Percent inputs (like `50%`) are converted to `0..255`. All commands are sent with a trailing newline to satisfy the printer's MQTT G-code requirements.
 
 ## License
 

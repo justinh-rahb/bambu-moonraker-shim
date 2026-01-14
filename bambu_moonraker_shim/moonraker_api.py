@@ -12,6 +12,7 @@ from bambu_moonraker_shim.state_manager import state_manager
 from bambu_moonraker_shim.bambu_client import bambu_client
 from bambu_moonraker_shim.config import Config
 from bambu_moonraker_shim.database_manager import database_manager
+from bambu_moonraker_shim.fan_control import FanTarget, build_fan_command
 from bambu_moonraker_shim.ftps_client import ftps_client
 from bambu_moonraker_shim.sqlite_manager import get_sqlite_manager
 
@@ -754,6 +755,26 @@ async def handle_jsonrpc(
 
     elif method == "server.gcode_store":
         response["result"] = {"gcode_store": []}
+
+    elif method == "printer.fan.set_speed":
+        params = request.get("params", {})
+        fan_name = params.get("fan")
+        speed = params.get("speed")
+
+        try:
+            command = build_fan_command(fan_name, speed)
+        except ValueError as exc:
+            response["error"] = {"code": 400, "message": str(exc)}
+            return response
+
+        await bambu_client.send_gcode_line(command.gcode)
+
+        if command.target == FanTarget.PART:
+            await state_manager.update_state(
+                {"fan": {"speed": command.speed / 255.0 if command.speed > 0 else 0.0}}
+            )
+
+        response["result"] = "ok"
 
     elif method == "server.webcams.list":
         # Retrieve webcams from database
