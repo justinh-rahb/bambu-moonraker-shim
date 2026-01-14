@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+import secrets
 import uuid
 import os
 import tempfile
@@ -15,6 +16,13 @@ from ftps_client import ftps_client
 from sqlite_manager import get_sqlite_manager
 
 router = APIRouter()
+
+
+@router.get("/access/oneshot_token")
+async def access_oneshot_token():
+    token = secrets.token_urlsafe(32)
+    expires = int(time.time()) + 60
+    return success_response({"token": token, "expires": expires})
 
 
 # --- HTTP Helpers ---
