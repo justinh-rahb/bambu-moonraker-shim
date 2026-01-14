@@ -201,7 +201,7 @@ class StateManager:
     async def _handle_print_state_change(self, new_state: str, filename: str, filament_used: float):
         """Track job history when print state changes."""
         # Import here to avoid circular dependency
-        from sqlite_manager import get_sqlite_manager
+        from bambu_moonraker_shim.sqlite_manager import get_sqlite_manager
         
         sqlite_manager = get_sqlite_manager()
         

@@ -3,7 +3,7 @@ import ssl
 import socket
 import time
 from typing import List, Dict, Optional, Any
-from config import Config
+from bambu_moonraker_shim.config import Config
 
 class ImplicitFTP_TLS(ftplib.FTP_TLS):
     """

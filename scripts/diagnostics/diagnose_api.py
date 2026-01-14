@@ -1,6 +1,6 @@
-from moonraker_api import get_directory, success_response, error_response
-from config import Config
-from ftps_client import ftps_client
+from bambu_moonraker_shim.moonraker_api import get_directory, success_response, error_response
+from bambu_moonraker_shim.config import Config
+from bambu_moonraker_shim.ftps_client import ftps_client
 
 # Mock generic helper functions that might depend on router context if needed
 # But verify_ftps just imports straight from classes. 

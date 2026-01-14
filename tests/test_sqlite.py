@@ -4,7 +4,7 @@ Quick test to verify SQLite manager and file caching works.
 """
 
 import time
-from sqlite_manager import get_sqlite_manager
+from bambu_moonraker_shim.sqlite_manager import get_sqlite_manager
 
 def test_file_cache():
     print("Testing SQLite file cache...")

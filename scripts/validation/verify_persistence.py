@@ -1,7 +1,7 @@
 import os
 import json
 import time
-from database_manager import DatabaseManager
+from bambu_moonraker_shim.database_manager import DatabaseManager
 
 DB_FILE = "test_persistence.json"
 

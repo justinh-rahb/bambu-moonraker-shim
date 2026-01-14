@@ -5,8 +5,8 @@ This script performs the "Gap A/B/C" discovery outlined in the user's research.
 """
 
 import os
-from ftps_client import ftps_client
-from config import Config
+from bambu_moonraker_shim.ftps_client import ftps_client
+from bambu_moonraker_shim.config import Config
 
 def probe_ftps():
     """Run discovery probes on the Bambu printer FTPS server."""

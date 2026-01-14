@@ -3,8 +3,8 @@ import json
 import logging
 from unittest.mock import MagicMock 
 import pytest
-from moonraker_api import get_directory
-from sqlite_manager import get_sqlite_manager
+from bambu_moonraker_shim.moonraker_api import get_directory
+from bambu_moonraker_shim.sqlite_manager import get_sqlite_manager
 
 async def test_files_response():
     # Mocking SQLite manager's response to simulate cached files
