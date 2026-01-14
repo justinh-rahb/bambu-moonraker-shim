@@ -7,6 +7,13 @@ class StateManager:
         self._state: Dict[str, Any] = {
             "extruder": {"temperature": 0.0, "target": 0.0, "power": 0.0, "pressure_advance": 0.0, "smooth_time": 0.0},
             "heater_bed": {"temperature": 0.0, "target": 0.0, "power": 0.0},
+            "fan": {"speed": 0.0},
+            "virtual_sdcard": {"progress": 0.0, "is_active": False, "file_position": 0},
+            "display_status": {"progress": 0.0, "message": ""},
+            "heaters": {
+                "available_heaters": ["extruder", "heater_bed"],
+                "available_sensors": []
+            },
             "print_stats": {
                 "state": "standby", # standby, printing, paused, complete, error, cancelling
                 "filename": "",
@@ -38,6 +45,9 @@ class StateManager:
                     "heater_bed": {
                         "min_temp": 0,
                         "max_temp": 120
+                    },
+                    "fan": {
+                        "pin": "fan0"
                     },
                     "virtual_sdcard": {
                         "path": "/tmp/gcodes"
@@ -97,6 +107,11 @@ class StateManager:
                 "state_message": "Printer is ready"
             }
         }
+        self._max_temp_samples = 600
+        self._temperature_objects = {"extruder", "heater_bed"}
+        self._temperature_history: Dict[str, Dict[str, List[float]]] = {}
+        for sensor in self._temperature_objects:
+            self._record_temperature_sample(sensor)
         self._subscribers: List[Any] = [] # List[WebSocket]
         self._last_event_time = time.time()
         
@@ -128,6 +143,10 @@ class StateManager:
                 
                 if category_changes:
                     changed_objects[category] = category_changes
+                if category in self._temperature_objects:
+                    self._record_temperature_sample(category)
+            elif category in self._temperature_objects:
+                self._record_temperature_sample(category)
         
         # Track job history when print state changes
         if "print_stats" in changed_objects and "state" in changed_objects["print_stats"]:
@@ -140,6 +159,44 @@ class StateManager:
         if changed_objects:
             self._last_event_time = time.time()
             await self._notify_subscribers(changed_objects)
+
+    def _append_history_value(self, sensor: str, field: str, value: Optional[float]):
+        if value is None:
+            return
+        history = self._temperature_history.setdefault(sensor, {})
+        series = history.setdefault(field, [])
+        series.append(float(value))
+        if len(series) > self._max_temp_samples:
+            series.pop(0)
+
+    def _record_temperature_sample(self, sensor: str):
+        if sensor not in self._temperature_objects:
+            return
+        sensor_state = self._state.get(sensor)
+        if not sensor_state:
+            return
+        self._append_history_value(sensor, "temperatures", sensor_state.get("temperature"))
+        self._append_history_value(sensor, "targets", sensor_state.get("target"))
+        self._append_history_value(sensor, "powers", sensor_state.get("power"))
+
+    def get_temperature_history(self, include_monitors: bool = False) -> Dict[str, Any]:
+        history: Dict[str, Any] = {}
+        for sensor in self._temperature_objects:
+            sensor_history = self._temperature_history.get(sensor)
+            if sensor_history:
+                history[sensor] = {key: list(values) for key, values in sensor_history.items() if values}
+            if sensor not in history:
+                sensor_state = self._state.get(sensor, {})
+                seeded = {}
+                if "temperature" in sensor_state:
+                    seeded.setdefault("temperatures", []).append(float(sensor_state["temperature"]))
+                if "target" in sensor_state:
+                    seeded.setdefault("targets", []).append(float(sensor_state["target"]))
+                if "power" in sensor_state:
+                    seeded.setdefault("powers", []).append(float(sensor_state["power"]))
+                if seeded:
+                    history[sensor] = seeded
+        return history
 
     async def _handle_print_state_change(self, new_state: str, filename: str, filament_used: float):
         """Track job history when print state changes."""

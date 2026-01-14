@@ -5,6 +5,7 @@ import asyncio
 from config import Config
 from moonraker_api import router as moonraker_router
 from bambu_client import bambu_client
+from database_manager import database_manager
 
 app = FastAPI(title="Bambu Moonraker Shim", version="0.0.1")
 
@@ -22,6 +23,7 @@ app.include_router(moonraker_router)
 @app.on_event("startup")
 async def startup_event():
     print("Starting Bambu Moonraker Shim...")
+    database_manager.ensure_temperature_panel()
     # Start the Bambu Client (MQTT loop)
     await bambu_client.start()
 

@@ -85,7 +85,8 @@ async def test_missing_ws_methods():
 
             print(f"Temperature Store: {resp}")
             assert resp["id"] == 2
-            assert "temperatures" in resp["result"]
+            assert "extruder" in resp["result"]
+            assert "temperatures" in resp["result"]["extruder"]
 
             # 2. server.files.metadata
             req = {"jsonrpc": "2.0", "method": "server.files.metadata", "params": {"filename": "test.gcode"}, "id": 3}

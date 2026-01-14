@@ -79,18 +79,22 @@ class BambuClient:
         updates = {}
 
         # Extruder (nozzle)
-        if "nozzle_temper" in data and "nozzle_target_temper" in data:
-            updates["extruder"] = {
-                "temperature": float(data.get("nozzle_temper", 0)),
-                "target": float(data.get("nozzle_target_temper", 0))
-            }
+        extruder_update = {}
+        if "nozzle_temper" in data:
+            extruder_update["temperature"] = float(data.get("nozzle_temper", 0))
+        if "nozzle_target_temper" in data:
+            extruder_update["target"] = float(data.get("nozzle_target_temper", 0))
+        if extruder_update:
+            updates["extruder"] = extruder_update
 
         # Bed
-        if "bed_temper" in data and "bed_target_temper" in data:
-            updates["heater_bed"] = {
-                "temperature": float(data.get("bed_temper", 0)),
-                "target": float(data.get("bed_target_temper", 0))
-            }
+        bed_update = {}
+        if "bed_temper" in data:
+            bed_update["temperature"] = float(data.get("bed_temper", 0))
+        if "bed_target_temper" in data:
+            bed_update["target"] = float(data.get("bed_target_temper", 0))
+        if bed_update:
+            updates["heater_bed"] = bed_update
 
         # Fan
         if "cooling_fan_speed" in data:
@@ -102,6 +106,7 @@ class BambuClient:
                 pass
 
         # Print Stats & Progress
+        klipper_state = None
         if "gcode_state" in data:
             # IDLE, RUNNING, PAUSE, FINISH, etc.
             bambu_state = data.get("gcode_state", "IDLE")
@@ -122,14 +127,14 @@ class BambuClient:
             if "subtask_name" in data:
                 updates["print_stats"]["filename"] = data["subtask_name"]
 
-            # Progress
-            if "mc_percent" in data:
-                progress = float(data.get("mc_percent", 0)) / 100.0
-                updates["virtual_sdcard"] = {
-                    "progress": progress,
-                    "is_active": klipper_state == "printing"
-                }
-                updates["display_status"] = {"progress": progress}
+        # Progress
+        if "mc_percent" in data:
+            progress = float(data.get("mc_percent", 0)) / 100.0
+            updates["virtual_sdcard"] = {"progress": progress}
+            if klipper_state:
+                 updates["virtual_sdcard"]["is_active"] = klipper_state == "printing"
+
+            updates["display_status"] = {"progress": progress}
             
             # Duration (Bambu sends minutes_remaining, logic needed for elapsed)
             # For MVP we might just use time.time() difference if we tracked start,

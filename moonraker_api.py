@@ -79,6 +79,12 @@ async def printer_info():
     )
 
 
+@router.get("/server/temperature_store")
+async def http_temperature_store(include_monitors: bool = False):
+    data = state_manager.get_temperature_history(include_monitors)
+    return success_response(data)
+
+
 @router.get("/printer/objects/list")
 async def objects_list():
     # Return keys from our observable state
@@ -542,13 +548,8 @@ async def handle_jsonrpc(
         response["result"] = {"namespace": namespace, "key": key, "value": val}
 
     elif method == "server.temperature_store":
-        # Mock temperature store
-        response["result"] = {
-            "keys": ["extruder", "heater_bed"],
-            "min": 0,
-            "max": 300,
-            "temperatures": {"extruder": [], "heater_bed": []},  # Empty history for now
-        }
+        include_monitors = request.get("params", {}).get("include_monitors", False)
+        response["result"] = state_manager.get_temperature_history(include_monitors)
 
     elif method == "server.files.metadata":
         filename = request.get("params", {}).get("filename")
