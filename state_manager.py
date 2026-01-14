@@ -8,6 +8,8 @@ class StateManager:
             "extruder": {"temperature": 0.0, "target": 0.0, "power": 0.0, "pressure_advance": 0.0, "smooth_time": 0.0},
             "heater_bed": {"temperature": 0.0, "target": 0.0, "power": 0.0},
             "fan": {"speed": 0.0},
+            "fan_generic aux_fan": {"speed": 0.0},
+            "fan_generic exhaust_fan": {"speed": 0.0},
             "virtual_sdcard": {"progress": 0.0, "is_active": False, "file_position": 0},
             "display_status": {"progress": 0.0, "message": ""},
             "heaters": {
@@ -49,6 +51,12 @@ class StateManager:
                     "fan": {
                         "pin": "fan0"
                     },
+                    "fan_generic aux_fan": {
+                        "pin": "fan1"
+                    },
+                    "fan_generic exhaust_fan": {
+                        "pin": "fan2"
+                    },
                     "virtual_sdcard": {
                         "path": "/tmp/gcodes"
                     },
@@ -57,11 +65,11 @@ class StateManager:
                     "gcode_macro pause": {},
                     "gcode_macro resume": {},
                     "gcode_macro cancel_print": {},
-                    "output_pin caselight": {
-                         "pin": "gpio1",
-                         "pwm": False,
-                         "value": 0,
-                         "shutdown_value": 0
+                    "output_pin light": {
+                        "pin": "gpio1",
+                        "pwm": False,
+                        "value": 0,
+                        "shutdown_value": 0
                     }
                 },
                 "config": {
@@ -79,6 +87,15 @@ class StateManager:
                         "min_temp": "0",
                         "max_temp": "120"
                     },
+                    "fan": {
+                        "pin": "fan0"
+                    },
+                    "fan_generic aux_fan": {
+                        "pin": "fan1"
+                    },
+                    "fan_generic exhaust_fan": {
+                        "pin": "fan2"
+                    },
                     "virtual_sdcard": {
                         "path": "/tmp/gcodes"
                     },
@@ -86,7 +103,13 @@ class StateManager:
                     "display_status": {},
                     "gcode_macro pause": {},
                     "gcode_macro resume": {},
-                    "gcode_macro cancel_print": {}
+                    "gcode_macro cancel_print": {},
+                    "output_pin light": {
+                        "pin": "gpio1",
+                        "pwm": False,
+                        "value": 0,
+                        "shutdown_value": 0
+                    }
                 }
             },
             "virtual_sdcard": {
@@ -99,7 +122,9 @@ class StateManager:
                 "progress": 0.0,
             },
             "fan": {"speed": 0.0},
-            "output_pin caselight": {
+            "fan_generic aux_fan": {"speed": 0.0},
+            "fan_generic exhaust_fan": {"speed": 0.0},
+            "output_pin light": {
                 "value": 0.0
             },
             "webhooks": {

@@ -34,8 +34,23 @@ CONFIG_FILES = {
             "min_temp: 0",
             "max_temp: 120",
             "",
+            "[fan]",
+            "pin: fan0",
+            "",
+            "[fan_generic aux_fan]",
+            "pin: fan1",
+            "",
+            "[fan_generic exhaust_fan]",
+            "pin: fan2",
+            "",
             "[virtual_sdcard]",
             "path: /tmp/gcodes",
+            "",
+            "[output_pin light]",
+            "pin: gpio1",
+            "pwm: false",
+            "value: 0",
+            "shutdown_value: 0",
             "",
             "[display_status]",
             "",
@@ -807,7 +822,7 @@ async def handle_jsonrpc(
                 continue
             
             # Intercept SET_PIN command for LED control
-            # Format: SET_PIN PIN=caselight VALUE=1.00
+            # Format: SET_PIN PIN=light VALUE=1.00
             if line.upper().startswith("SET_PIN"):
                 try:
                     parts = line.split()
@@ -819,11 +834,11 @@ async def handle_jsonrpc(
                         elif part.upper().startswith("VALUE="):
                             value = float(part.split("=")[1])
                     
-                    if pin_name == "caselight":
+                    if pin_name in {"light", "caselight"}:
                         is_on = value > 0
                         await bambu_client.set_light(is_on)
                         # Updates state locally so UI reflects change immediately
-                        await state_manager.update_state({"output_pin caselight": {"value": 1.0 if is_on else 0.0}})
+                        await state_manager.update_state({"output_pin light": {"value": 1.0 if is_on else 0.0}})
                         continue # Don't send this to printer as raw gcode
                 except Exception as e:
                     print(f"Error parsing SET_PIN: {e}")

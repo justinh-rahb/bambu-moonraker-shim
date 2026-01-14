@@ -96,14 +96,27 @@ class BambuClient:
         if bed_update:
             updates["heater_bed"] = bed_update
 
-        # Fan
-        if "cooling_fan_speed" in data:
-            # Bambu sends 0-15 (sometimes strings), map to 0.0-1.0
+        # Fans
+        def _parse_fan_speed(key: str) -> Optional[float]:
+            if key not in data:
+                return None
             try:
-                speed = float(data.get("cooling_fan_speed", 0))
-                updates["fan"] = {"speed": speed / 15.0 if speed > 0 else 0.0}
-            except:
-                pass
+                speed = float(data.get(key, 0))
+            except (TypeError, ValueError):
+                return None
+            return speed / 15.0 if speed > 0 else 0.0
+
+        part_fan_speed = _parse_fan_speed("cooling_fan_speed")
+        if part_fan_speed is not None:
+            updates["fan"] = {"speed": part_fan_speed}
+
+        aux_fan_speed = _parse_fan_speed("aux_fan_speed")
+        if aux_fan_speed is not None:
+            updates["fan_generic aux_fan"] = {"speed": aux_fan_speed}
+
+        exhaust_fan_speed = _parse_fan_speed("chamber_fan_speed")
+        if exhaust_fan_speed is not None:
+            updates["fan_generic exhaust_fan"] = {"speed": exhaust_fan_speed}
 
         # Print Stats & Progress
         klipper_state = None
