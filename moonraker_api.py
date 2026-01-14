@@ -12,6 +12,7 @@ from bambu_client import bambu_client
 from config import Config
 from database_manager import database_manager
 from ftps_client import ftps_client
+from sqlite_manager import get_sqlite_manager
 
 router = APIRouter()
 
@@ -146,6 +147,59 @@ async def file_list(root: str = "gcodes"):
         return success_response([])
 
 
+@router.get("/server/files/directory")
+async def get_directory(path: str = "gcodes", extended: bool = False):
+    """
+    Get directory contents with caching support.
+    Used by Mainsail's file browser.
+    """
+    sqlite_manager = get_sqlite_manager()
+    
+    # Try cache first (5 minute TTL)
+    cached_files = sqlite_manager.get_cached_files(max_age=300)
+    
+    if cached_files is None:
+        # Cache miss - fetch from FTPS
+        print(f"Cache miss - fetching files from FTPS for path: {path}")
+        try:
+            remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
+            # Cache the results
+            sqlite_manager.cache_files(remote_files)
+            cached_files = remote_files
+        except Exception as e:
+            print(f"Error fetching files from FTPS: {e}")
+            cached_files = []
+    else:
+        print(f"Cache hit - returning {len(cached_files)} cached files")
+    
+    # Transform to Moonraker format
+    dirs = []
+    files = []
+    
+    for f in cached_files:
+        if f["is_dir"]:
+            dirs.append({
+                "dirname": f["name"],
+                "modified": f["modified"],
+                "size": f["size"]
+            })
+        else:
+            files.append({
+                "filename": f["name"],
+                "modified": f["modified"],
+                "size": f["size"]
+            })
+    
+    result = {
+        "dirs": dirs,
+        "files": files,
+        "disk_usage": {"total": 0, "used": 0, "free": 0},
+        "root_info": {"name": path}
+    }
+    
+    return success_response(result)
+
+
 @router.post("/server/files/upload")
 async def file_upload(file: UploadFile = File(...), path: str = None):
     try:
@@ -159,6 +213,10 @@ async def file_upload(file: UploadFile = File(...), path: str = None):
             
             # Upload to printer via FTPS
             ftps_client.upload_file(temp_path, file.filename)
+            
+            # Invalidate file cache so next list is fresh
+            sqlite_manager = get_sqlite_manager()
+            sqlite_manager.clear_file_cache()
             
             # Get file size
             file_size = len(content)
@@ -187,6 +245,11 @@ async def file_delete(filename: str):
     """Delete a file from the printer via FTPS."""
     try:
         ftps_client.delete_file(filename)
+        
+        # Invalidate file cache so next list is fresh
+        sqlite_manager = get_sqlite_manager()
+        sqlite_manager.clear_file_cache()
+        
         return success_response("ok")
     except Exception as e:
         print(f"Delete error: {e}")
@@ -395,6 +458,8 @@ async def handle_jsonrpc(
                 "database",
                 "file_manager",
                 "webcams",
+                "history",
+                "job_queue",
             ],
             "version": "v0.0.1-bambu-shim",
             "api_version": [1, 0, 0],
@@ -422,8 +487,6 @@ async def handle_jsonrpc(
         for key in params.keys():
             if key in current_state:
                 result_status[key] = current_state[key]
-        response["result"] = {"status": result_status, "eventtime": time.time()}
-
         response["result"] = {"status": result_status, "eventtime": time.time()}
 
     elif method == "server.database.get_item":
@@ -627,6 +690,108 @@ async def handle_jsonrpc(
                 print(f"Executing G-code: {line}")
                 await bambu_client.send_gcode_line(line)
         response["result"] = "ok"
+
+    elif method == "server.files.roots":
+        response["result"] = {
+            "roots": [
+                {
+                    "name": "gcodes",
+                    "path": "gcodes",
+                    "permissions": "rw"
+                },
+                {
+                    "name": "config",
+                    "path": "config",
+                    "permissions": "rw"
+                }
+            ]
+        }
+
+    elif method == "server.files.get_directory":
+        # Get file listing with caching
+        params = request.get("params", {})
+        path = params.get("path", "gcodes")
+        extended = params.get("extended", False)
+        
+        sqlite_manager = get_sqlite_manager()
+        
+        # Try cache first (5 minute TTL)
+        cached_files = sqlite_manager.get_cached_files(max_age=300)
+        
+        if cached_files is None:
+            # Cache miss - fetch from FTPS
+            print(f"Cache miss - fetching files from FTPS for path: {path}")
+            try:
+                remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
+                # Cache the results
+                sqlite_manager.cache_files(remote_files)
+                cached_files = remote_files
+            except Exception as e:
+                print(f"Error fetching files from FTPS: {e}")
+                cached_files = []
+        else:
+            print(f"Cache hit - returning {len(cached_files)} cached files")
+        
+        # Transform to Moonraker format
+        dirs = []
+        files = []
+        
+        for f in cached_files:
+            if f["is_dir"]:
+                dirs.append({
+                    "dirname": f["name"],
+                    "modified": f["modified"],
+                    "size": f["size"]
+                })
+            else:
+                files.append({
+                    "filename": f["name"],
+                    "modified": f["modified"],
+                    "size": f["size"]
+                })
+        
+        response["result"] = {
+            "dirs": dirs,
+            "files": files,
+            "disk_usage": {"total": 0, "used": 0, "free": 0},
+            "root_info": {"name": path}
+        }
+
+    elif method == "server.history.list":
+        # Get job history from SQLite
+        params = request.get("params", {})
+        limit = params.get("limit", 50)
+        start = params.get("start", 0)
+        before = params.get("before")
+        since = params.get("since")
+        order = params.get("order", "desc")
+        
+        sqlite_manager = get_sqlite_manager()
+        history = sqlite_manager.get_job_history(
+            limit=limit,
+            before=before,
+            since=since,
+            order=order
+        )
+        
+        response["result"] = history
+
+    elif method == "server.history.totals":
+        # Get job totals
+        sqlite_manager = get_sqlite_manager()
+        totals = sqlite_manager.get_job_totals()
+        
+        response["result"] = {
+            "job_totals": totals
+        }
+
+    elif method == "server.job_queue.status":
+        # Bambu doesn't support native job queuing
+        # Return empty queue
+        response["result"] = {
+            "queued_jobs": [],
+            "queue_state": "ready"
+        }
 
     else:
         # Ignore unknown methods or return null result to avoid errors
