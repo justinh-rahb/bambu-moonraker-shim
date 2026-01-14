@@ -2,6 +2,8 @@ import asyncio
 import json
 import time
 import uuid
+import os
+import tempfile
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, UploadFile, File
 from fastapi.responses import JSONResponse
@@ -9,6 +11,8 @@ from state_manager import state_manager
 from bambu_client import bambu_client
 from config import Config
 from database_manager import database_manager
+from ftps_client import ftps_client
+from sqlite_manager import get_sqlite_manager
 
 router = APIRouter()
 
@@ -118,21 +122,156 @@ async def file_list(root: str = "gcodes"):
     if root == "config":
         return success_response([])
 
-    # Mock file list for MVP
-    # In real impl, we'd list local files or query printer
-    files = [
-        {"path": "gcodes/benchy.gcode", "size": 123456, "modified": time.time()},
-        {"path": "gcodes/calibration.gcode", "size": 65432, "modified": time.time()},
-    ]
-    return success_response(files)
+    try:
+        # List files from printer via FTPS
+        remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
+        
+        # Filter to only show gcode files (not directories)
+        # Mainsail expects a flat list with "path" starting with "gcodes/"
+        files = []
+        for f in remote_files:
+            if not f["is_dir"]:
+                # Filter by extension if desired
+                name = f["name"]
+                if name.endswith((".gcode", ".gcode.3mf", ".3mf")):
+                    files.append({
+                        "path": f"gcodes/{name}",
+                        "size": f["size"],
+                        "modified": f["modified"]
+                    })
+        
+        return success_response(files)
+    except Exception as e:
+        print(f"Error listing files: {e}")
+        # Return empty list on error rather than failing
+        return success_response([])
+
+
+@router.get("/server/files/directory")
+async def get_directory(path: str = "gcodes", extended: bool = False):
+    """
+    Get directory contents with caching support.
+    Used by Mainsail's file browser.
+    """
+    sqlite_manager = get_sqlite_manager()
+    
+    # Determine actua FTPS path to check
+    ftps_path = Config.BAMBU_FTPS_UPLOADS_DIR
+    
+    # If user is browsing a subdirectory of gcodes
+    if path.startswith("gcodes/") and len(path) > 7:
+        subdir = path[7:] # Strip "gcodes/"
+        ftps_path = f"{Config.BAMBU_FTPS_UPLOADS_DIR}/{subdir}".replace("//", "/")
+
+    # NOTE: Same cache logic as WebSocket endpoint
+    cached_files = None
+    if path == "gcodes":
+            cached_files = sqlite_manager.get_cached_files(max_age=300)
+    
+    if cached_files is None:
+        # Cache miss - fetch from FTPS
+        print(f"Fetching files from FTPS for path: {ftps_path} (requested: {path})")
+        try:
+            remote_files = ftps_client.list_files(ftps_path)
+            # Only cache the root listing for now
+            if path == "gcodes":
+                sqlite_manager.cache_files(remote_files)
+            cached_files = remote_files
+        except Exception as e:
+            print(f"Error fetching files from FTPS: {e}")
+            cached_files = []
+    
+    # Transform to Moonraker format
+    dirs = []
+    files = []
+    
+    for f in cached_files:
+        if f["is_dir"]:
+            dirs.append({
+                "dirname": f["name"],
+                "modified": f["modified"],
+                "size": f["size"],
+                "permissions": "rw"
+            })
+        else:
+            files.append({
+                "filename": f["name"],
+                "modified": f["modified"],
+                "size": f["size"],
+                "permissions": "rw"
+            })
+    
+    result = {
+        "dirs": dirs,
+        "files": files,
+        "disk_usage": {
+            "total": 32 * 1024 * 1024 * 1024, # 32GB
+            "used": 1 * 1024 * 1024 * 1024,   # 1GB
+            "free": 31 * 1024 * 1024 * 1024   # 31GB
+        },
+        "root_info": {
+            "name": "gcodes",
+            "permissions": "rw"
+        }
+    }
+    
+    return success_response(result)
 
 
 @router.post("/server/files/upload")
 async def file_upload(file: UploadFile = File(...), path: str = None):
-    # Dummy upload
-    return success_response(
-        {"item": {"path": f"gcodes/{file.filename}", "size": 0}, "print_started": False}
-    )
+    try:
+        # Save uploaded file to a temp location first
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".gcode")
+        try:
+            # Write the uploaded file to temp
+            with os.fdopen(temp_fd, 'wb') as tmp:
+                content = await file.read()
+                tmp.write(content)
+            
+            # Upload to printer via FTPS
+            ftps_client.upload_file(temp_path, file.filename)
+            
+            # Invalidate file cache so next list is fresh
+            sqlite_manager = get_sqlite_manager()
+            sqlite_manager.clear_file_cache()
+            
+            # Get file size
+            file_size = len(content)
+            
+            return success_response({
+                "item": {
+                    "path": f"gcodes/{file.filename}",
+                    "size": file_size,
+                    "modified": time.time()
+                },
+                "print_started": False
+            })
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+    except Exception as e:
+        print(f"Upload error: {e}")
+        return error_response(500, f"Upload failed: {str(e)}")
+
+
+
+
+@router.delete("/server/files/gcodes/{filename:path}")
+async def file_delete(filename: str):
+    """Delete a file from the printer via FTPS."""
+    try:
+        ftps_client.delete_file(filename)
+        
+        # Invalidate file cache so next list is fresh
+        sqlite_manager = get_sqlite_manager()
+        sqlite_manager.clear_file_cache()
+        
+        return success_response("ok")
+    except Exception as e:
+        print(f"Delete error: {e}")
+        return error_response(500, f"Delete failed: {str(e)}")
 
 
 @router.get("/server/files/{root}/{path:path}")
@@ -337,6 +476,8 @@ async def handle_jsonrpc(
                 "database",
                 "file_manager",
                 "webcams",
+                "history",
+                "job_queue",
             ],
             "version": "v0.0.1-bambu-shim",
             "api_version": [1, 0, 0],
@@ -364,8 +505,6 @@ async def handle_jsonrpc(
         for key in params.keys():
             if key in current_state:
                 result_status[key] = current_state[key]
-        response["result"] = {"status": result_status, "eventtime": time.time()}
-
         response["result"] = {"status": result_status, "eventtime": time.time()}
 
     elif method == "server.database.get_item":
@@ -569,6 +708,132 @@ async def handle_jsonrpc(
                 print(f"Executing G-code: {line}")
                 await bambu_client.send_gcode_line(line)
         response["result"] = "ok"
+
+    elif method == "server.files.roots":
+        response["result"] = {
+            "roots": [
+                {
+                    "name": "gcodes",
+                    "path": "gcodes",
+                    "permissions": "rw"
+                },
+                {
+                    "name": "config",
+                    "path": "config",
+                    "permissions": "rw"
+                }
+            ]
+        }
+
+    elif method == "server.files.get_directory":
+        # Get file listing with caching
+        params = request.get("params", {})
+        path = params.get("path", "gcodes")
+        
+        # Determine actual FTPS path to check
+        # Moonraker path is "gcodes/subdirectory", but we need relative for FTPS
+        ftps_path = Config.BAMBU_FTPS_UPLOADS_DIR
+        
+        # If user is browsing a subdirectory of gcodes
+        if path.startswith("gcodes/") and len(path) > 7:
+            subdir = path[7:] # Strip "gcodes/"
+            ftps_path = f"{Config.BAMBU_FTPS_UPLOADS_DIR}/{subdir}".replace("//", "/")
+        
+        sqlite_manager = get_sqlite_manager()
+        
+        # NOTE: Current simple cache implementation assumes key is always "gcodes" list
+        # We need to update cache key to be path-specific
+        # For now, we only cache the root. Subdirs will bypass cache or we need to fix cache key.
+        # Let's simple check: if root, leverage cache. If subdir, fetch fresh (or update cache key logic).
+        
+        cached_files = None
+        if path == "gcodes":
+             cached_files = sqlite_manager.get_cached_files(max_age=300)
+        
+        if cached_files is None:
+            # Cache miss - fetch from FTPS
+            print(f"Fetching files from FTPS for path: {ftps_path} (requested: {path})")
+            try:
+                remote_files = ftps_client.list_files(ftps_path)
+                # Only cache the root listing for now to avoid complexity
+                if path == "gcodes":
+                    sqlite_manager.cache_files(remote_files)
+                cached_files = remote_files
+            except Exception as e:
+                print(f"Error fetching files from FTPS: {e}")
+                cached_files = []
+        else:
+            print(f"Cache hit - returning {len(cached_files)} cached files")
+        
+        # Transform to Moonraker format
+        dirs = []
+        files = []
+        
+        for f in cached_files:
+            if f["is_dir"]:
+                dirs.append({
+                    "dirname": f["name"],
+                    "modified": f["modified"],
+                    "size": f["size"],
+                    "permissions": "rw"
+                })
+            else:
+                files.append({
+                    "filename": f["name"],
+                    "modified": f["modified"],
+                    "size": f["size"],
+                    "permissions": "rw"
+                })
+        
+        response["result"] = {
+            "dirs": dirs,
+            "files": files,
+            "disk_usage": {
+                "total": 32 * 1024 * 1024 * 1024, # 32GB Fake Total
+                "used": 1 * 1024 * 1024 * 1024,   # 1GB Fake Used
+                "free": 31 * 1024 * 1024 * 1024   # 31GB Fake Free
+            },
+            "root_info": {
+                "name": "gcodes", # Always the root name, even for subdirs
+                "permissions": "rw"
+            }
+        }
+
+    elif method == "server.history.list":
+        # Get job history from SQLite
+        params = request.get("params", {})
+        limit = params.get("limit", 50)
+        start = params.get("start", 0)
+        before = params.get("before")
+        since = params.get("since")
+        order = params.get("order", "desc")
+        
+        sqlite_manager = get_sqlite_manager()
+        history = sqlite_manager.get_job_history(
+            limit=limit,
+            before=before,
+            since=since,
+            order=order
+        )
+        
+        response["result"] = history
+
+    elif method == "server.history.totals":
+        # Get job totals
+        sqlite_manager = get_sqlite_manager()
+        totals = sqlite_manager.get_job_totals()
+        
+        response["result"] = {
+            "job_totals": totals
+        }
+
+    elif method == "server.job_queue.status":
+        # Bambu doesn't support native job queuing
+        # Return empty queue
+        response["result"] = {
+            "queued_jobs": [],
+            "queue_state": "ready"
+        }
 
     else:
         # Ignore unknown methods or return null result to avoid errors

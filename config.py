@@ -18,6 +18,12 @@ class Config:
     HTTP_PORT = int(os.getenv("HTTP_PORT", "7125")) # Default Moonraker port
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     
+    # FTPS specific
+    BAMBU_FTPS_PORT = int(os.getenv("BAMBU_FTPS_PORT", "990"))
+    BAMBU_FTPS_USER = os.getenv("BAMBU_FTPS_USER", "bblp")
+    BAMBU_FTPS_PASS = os.getenv("BAMBU_FTPS_PASS", BAMBU_ACCESS_CODE)
+    BAMBU_FTPS_UPLOADS_DIR = os.getenv("BAMBU_FTPS_UPLOADS_DIR", "/")
+
     # Paths
     GCODES_DIR = os.getenv("GCODES_DIR", "gcodes")
 

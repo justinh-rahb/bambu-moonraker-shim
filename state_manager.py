@@ -1,5 +1,5 @@
-import asyncio
 import time
+import uuid
 from typing import Dict, Any, List, Optional
 
 class StateManager:
@@ -90,6 +90,11 @@ class StateManager:
         }
         self._subscribers: List[Any] = [] # List[WebSocket]
         self._last_event_time = time.time()
+        
+        # Job tracking
+        self._current_job_id: Optional[str] = None
+        self._current_job_start: Optional[float] = None
+        self._last_print_state: str = "standby"
 
     def get_state(self) -> Dict[str, Any]:
         return self._state
@@ -108,16 +113,83 @@ class StateManager:
                 current_category = self._state[category]
                 category_changes = {}
                 for key, value in values.items():
-                   if current_category.get(key) != value:
-                       current_category[key] = value
-                       category_changes[key] = value
+                    if current_category.get(key) != value:
+                        current_category[key] = value
+                        category_changes[key] = value
                 
                 if category_changes:
                     changed_objects[category] = category_changes
         
+        # Track job history when print state changes
+        if "print_stats" in changed_objects and "state" in changed_objects["print_stats"]:
+            await self._handle_print_state_change(
+                self._state["print_stats"]["state"],
+                self._state["print_stats"].get("filename", ""),
+                self._state["print_stats"].get("filament_used", 0.0)
+            )
+        
         if changed_objects:
             self._last_event_time = time.time()
             await self._notify_subscribers(changed_objects)
+
+    async def _handle_print_state_change(self, new_state: str, filename: str, filament_used: float):
+        """Track job history when print state changes."""
+        # Import here to avoid circular dependency
+        from sqlite_manager import get_sqlite_manager
+        
+        sqlite_manager = get_sqlite_manager()
+        
+        # Starting a new print
+        if new_state == "printing" and self._last_print_state != "printing":
+            self._current_job_id = str(uuid.uuid4())[:8]  # Short ID
+            self._current_job_start = time.time()
+            print(f"Job started: {self._current_job_id} - {filename}")
+        
+        # Print completed
+        elif new_state == "complete" and self._current_job_id:
+            end_time = time.time()
+            duration = end_time - self._current_job_start if self._current_job_start else 0
+            
+            job_data = {
+                "job_id": self._current_job_id,
+                "filename": filename,
+                "start_time": self._current_job_start,
+                "end_time": end_time,
+                "total_duration": duration,
+                "status": "completed",
+                "filament_used": filament_used,
+                "metadata": {}
+            }
+            
+            sqlite_manager.add_job(job_data)
+            print(f"Job completed: {self._current_job_id} - {filename} ({duration:.0f}s)")
+            
+            self._current_job_id = None
+            self._current_job_start = None
+        
+        # Print cancelled or error
+        elif new_state in ("cancelled", "error", "standby") and self._current_job_id:
+            end_time = time.time()
+            duration = end_time - self._current_job_start if self._current_job_start else 0
+            
+            job_data = {
+                "job_id": self._current_job_id,
+                "filename": filename,
+                "start_time": self._current_job_start,
+                "end_time": end_time,
+                "total_duration": duration,
+                "status": new_state if new_state in ("cancelled", "error") else "cancelled",
+                "filament_used": filament_used,
+                "metadata": {}
+            }
+            
+            sqlite_manager.add_job(job_data)
+            print(f"Job {job_data['status']}: {self._current_job_id} - {filename}")
+            
+            self._current_job_id = None
+            self._current_job_start = None
+        
+        self._last_print_state = new_state
 
     async def _notify_subscribers(self, changes: Dict[str, Any]):
         if not self._subscribers:
@@ -136,8 +208,8 @@ class StateManager:
         # but here we just iterate and send. Ideally this uses a callback or event bus.
         # For MVP, we will assume the API layer registers a callback instead of raw websockets if needed,
         # OR we just expose a method to 'emit' to all.
-        pass # The API layer will poll or hook into this. 
-             # Actually, better pattern: let API layer register a broadcast function.
+        # The API layer will poll or hook into this. 
+        # Actually, better pattern: let API layer register a broadcast function.
 
     _broadcast_callback = None
 
@@ -145,7 +217,7 @@ class StateManager:
         self._broadcast_callback = callback
 
     async def _notify_subscribers(self, changes: Dict[str, Any]):
-         if self._broadcast_callback:
+        if self._broadcast_callback:
             notification = {
                 "jsonrpc": "2.0",
                 "method": "notify_status_update",
