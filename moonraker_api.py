@@ -155,22 +155,31 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
     """
     sqlite_manager = get_sqlite_manager()
     
-    # Try cache first (5 minute TTL)
-    cached_files = sqlite_manager.get_cached_files(max_age=300)
+    # Determine actua FTPS path to check
+    ftps_path = Config.BAMBU_FTPS_UPLOADS_DIR
+    
+    # If user is browsing a subdirectory of gcodes
+    if path.startswith("gcodes/") and len(path) > 7:
+        subdir = path[7:] # Strip "gcodes/"
+        ftps_path = f"{Config.BAMBU_FTPS_UPLOADS_DIR}/{subdir}".replace("//", "/")
+
+    # NOTE: Same cache logic as WebSocket endpoint
+    cached_files = None
+    if path == "gcodes":
+            cached_files = sqlite_manager.get_cached_files(max_age=300)
     
     if cached_files is None:
         # Cache miss - fetch from FTPS
-        print(f"Cache miss - fetching files from FTPS for path: {path}")
+        print(f"Fetching files from FTPS for path: {ftps_path} (requested: {path})")
         try:
-            remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
-            # Cache the results
-            sqlite_manager.cache_files(remote_files)
+            remote_files = ftps_client.list_files(ftps_path)
+            # Only cache the root listing for now
+            if path == "gcodes":
+                sqlite_manager.cache_files(remote_files)
             cached_files = remote_files
         except Exception as e:
             print(f"Error fetching files from FTPS: {e}")
             cached_files = []
-    else:
-        print(f"Cache hit - returning {len(cached_files)} cached files")
     
     # Transform to Moonraker format
     dirs = []
@@ -181,20 +190,29 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
             dirs.append({
                 "dirname": f["name"],
                 "modified": f["modified"],
-                "size": f["size"]
+                "size": f["size"],
+                "permissions": "rw"
             })
         else:
             files.append({
                 "filename": f["name"],
                 "modified": f["modified"],
-                "size": f["size"]
+                "size": f["size"],
+                "permissions": "rw"
             })
     
     result = {
         "dirs": dirs,
         "files": files,
-        "disk_usage": {"total": 0, "used": 0, "free": 0},
-        "root_info": {"name": path}
+        "disk_usage": {
+            "total": 32 * 1024 * 1024 * 1024, # 32GB
+            "used": 1 * 1024 * 1024 * 1024,   # 1GB
+            "free": 31 * 1024 * 1024 * 1024   # 31GB
+        },
+        "root_info": {
+            "name": "gcodes",
+            "permissions": "rw"
+        }
     }
     
     return success_response(result)
@@ -711,20 +729,35 @@ async def handle_jsonrpc(
         # Get file listing with caching
         params = request.get("params", {})
         path = params.get("path", "gcodes")
-        extended = params.get("extended", False)
+        
+        # Determine actual FTPS path to check
+        # Moonraker path is "gcodes/subdirectory", but we need relative for FTPS
+        ftps_path = Config.BAMBU_FTPS_UPLOADS_DIR
+        
+        # If user is browsing a subdirectory of gcodes
+        if path.startswith("gcodes/") and len(path) > 7:
+            subdir = path[7:] # Strip "gcodes/"
+            ftps_path = f"{Config.BAMBU_FTPS_UPLOADS_DIR}/{subdir}".replace("//", "/")
         
         sqlite_manager = get_sqlite_manager()
         
-        # Try cache first (5 minute TTL)
-        cached_files = sqlite_manager.get_cached_files(max_age=300)
+        # NOTE: Current simple cache implementation assumes key is always "gcodes" list
+        # We need to update cache key to be path-specific
+        # For now, we only cache the root. Subdirs will bypass cache or we need to fix cache key.
+        # Let's simple check: if root, leverage cache. If subdir, fetch fresh (or update cache key logic).
+        
+        cached_files = None
+        if path == "gcodes":
+             cached_files = sqlite_manager.get_cached_files(max_age=300)
         
         if cached_files is None:
             # Cache miss - fetch from FTPS
-            print(f"Cache miss - fetching files from FTPS for path: {path}")
+            print(f"Fetching files from FTPS for path: {ftps_path} (requested: {path})")
             try:
-                remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
-                # Cache the results
-                sqlite_manager.cache_files(remote_files)
+                remote_files = ftps_client.list_files(ftps_path)
+                # Only cache the root listing for now to avoid complexity
+                if path == "gcodes":
+                    sqlite_manager.cache_files(remote_files)
                 cached_files = remote_files
             except Exception as e:
                 print(f"Error fetching files from FTPS: {e}")
@@ -741,20 +774,29 @@ async def handle_jsonrpc(
                 dirs.append({
                     "dirname": f["name"],
                     "modified": f["modified"],
-                    "size": f["size"]
+                    "size": f["size"],
+                    "permissions": "rw"
                 })
             else:
                 files.append({
                     "filename": f["name"],
                     "modified": f["modified"],
-                    "size": f["size"]
+                    "size": f["size"],
+                    "permissions": "rw"
                 })
         
         response["result"] = {
             "dirs": dirs,
             "files": files,
-            "disk_usage": {"total": 0, "used": 0, "free": 0},
-            "root_info": {"name": path}
+            "disk_usage": {
+                "total": 32 * 1024 * 1024 * 1024, # 32GB Fake Total
+                "used": 1 * 1024 * 1024 * 1024,   # 1GB Fake Used
+                "free": 31 * 1024 * 1024 * 1024   # 31GB Fake Free
+            },
+            "root_info": {
+                "name": "gcodes", # Always the root name, even for subdirs
+                "permissions": "rw"
+            }
         }
 
     elif method == "server.history.list":
