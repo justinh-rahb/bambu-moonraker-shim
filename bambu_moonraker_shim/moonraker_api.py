@@ -85,6 +85,7 @@ def _config_directory_listing():
                 "modified": now,
                 "size": len(content.encode("utf-8")),
                 "permissions": "rw",
+                "path": _join_moonraker_path("config", name),
             }
         )
     return {
@@ -98,8 +99,13 @@ def _config_directory_listing():
         "root_info": {
             "name": "config",
             "permissions": "rw",
+            "path": "config",
         },
     }
+
+
+def _join_moonraker_path(root: str, name: str) -> str:
+    return f"{root.rstrip('/')}/{name}"
 
 
 @router.get("/access/oneshot_token")
@@ -292,14 +298,16 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
                 "dirname": f["name"],
                 "modified": f["modified"],
                 "size": f["size"],
-                "permissions": "rw"
+                "permissions": "rw",
+                "path": _join_moonraker_path(path, f["name"]),
             })
         else:
             files.append({
                 "filename": f["name"],
                 "modified": f["modified"],
                 "size": f["size"],
-                "permissions": "rw"
+                "permissions": "rw",
+                "path": _join_moonraker_path(path, f["name"]),
             })
     
     result = {
@@ -312,7 +320,8 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
         },
         "root_info": {
             "name": "gcodes",
-            "permissions": "rw"
+            "permissions": "rw",
+            "path": "gcodes",
         }
     }
     
@@ -899,14 +908,16 @@ async def handle_jsonrpc(
                     "dirname": f["name"],
                     "modified": f["modified"],
                     "size": f["size"],
-                    "permissions": "rw"
+                    "permissions": "rw",
+                    "path": _join_moonraker_path(path, f["name"]),
                 })
             else:
                 files.append({
                     "filename": f["name"],
                     "modified": f["modified"],
                     "size": f["size"],
-                    "permissions": "rw"
+                    "permissions": "rw",
+                    "path": _join_moonraker_path(path, f["name"]),
                 })
         
         response["result"] = {
@@ -919,7 +930,8 @@ async def handle_jsonrpc(
             },
             "root_info": {
                 "name": "gcodes", # Always the root name, even for subdirs
-                "permissions": "rw"
+                "permissions": "rw",
+                "path": "gcodes",
             }
         }
 
