@@ -70,6 +70,7 @@ def _config_file_listing():
                 "path": f"config/{name}",
                 "size": len(content.encode("utf-8")),
                 "modified": now,
+                "permissions": "rw",
             }
         )
     return files
@@ -85,6 +86,7 @@ def _config_directory_listing():
                 "modified": now,
                 "size": len(content.encode("utf-8")),
                 "permissions": "rw",
+                "path": _join_moonraker_path("config", name),
             }
         )
     return {
@@ -98,8 +100,91 @@ def _config_directory_listing():
         "root_info": {
             "name": "config",
             "permissions": "rw",
+            "path": "config",
         },
     }
+
+
+def _join_moonraker_path(root: str, name: str) -> str:
+    return f"{root.rstrip('/')}/{name}"
+
+
+def _mock_gcode_file() -> Dict[str, Any]:
+    return {
+        "name": "mock_file.gcode",
+        "size": 0,
+        "modified": time.time(),
+        "is_dir": False,
+    }
+
+
+def _mock_directory_listing(path: str) -> Dict[str, Any]:
+    files = []
+    if path == "gcodes":
+        mock_file = _mock_gcode_file()
+        files.append(
+            {
+                "filename": mock_file["name"],
+                "modified": mock_file["modified"],
+                "size": mock_file["size"],
+                "permissions": "rw",
+                "path": _join_moonraker_path(path, mock_file["name"]),
+            }
+        )
+
+    return {
+        "dirs": [],
+        "files": files,
+        "disk_usage": {
+            "total": 32 * 1024 * 1024 * 1024,  # 32GB
+            "used": 1 * 1024 * 1024 * 1024,  # 1GB
+            "free": 31 * 1024 * 1024 * 1024,  # 31GB
+        },
+        "root_info": {
+            "name": "gcodes",
+            "permissions": "rw",
+            "path": "gcodes",
+        },
+    }
+
+
+def _build_file_list(root: str) -> List[Dict[str, Any]]:
+    if root == "config":
+        return _config_file_listing()
+
+    if root != "gcodes":
+        return []
+
+    if not Config.BAMBU_SERIAL:
+        mock_file = _mock_gcode_file()
+        return [
+            {
+                "path": _join_moonraker_path("gcodes", mock_file["name"]),
+                "size": mock_file["size"],
+                "modified": mock_file["modified"],
+                "permissions": "rw",
+            }
+        ]
+
+    # List files from printer via FTPS
+    remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
+
+    # Filter to only show gcode files (not directories)
+    # Mainsail expects a flat list with "path" starting with "gcodes/"
+    files = []
+    for f in remote_files:
+        if not f["is_dir"]:
+            # Filter by extension if desired
+            name = f["name"]
+            if name.endswith((".gcode", ".gcode.3mf", ".3mf")):
+                files.append({
+                    "path": _join_moonraker_path("gcodes", name),
+                    "size": f["size"],
+                    "modified": f["modified"],
+                    "permissions": "rw",
+                })
+
+    return files
 
 
 @router.get("/access/oneshot_token")
@@ -217,27 +302,8 @@ async def objects_query(request: Request):
 
 @router.get("/server/files/list")
 async def file_list(root: str = "gcodes"):
-    if root == "config":
-        return success_response(_config_file_listing())
-
     try:
-        # List files from printer via FTPS
-        remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
-        
-        # Filter to only show gcode files (not directories)
-        # Mainsail expects a flat list with "path" starting with "gcodes/"
-        files = []
-        for f in remote_files:
-            if not f["is_dir"]:
-                # Filter by extension if desired
-                name = f["name"]
-                if name.endswith((".gcode", ".gcode.3mf", ".3mf")):
-                    files.append({
-                        "path": f"gcodes/{name}",
-                        "size": f["size"],
-                        "modified": f["modified"]
-                    })
-        
+        files = _build_file_list(root)
         return success_response(files)
     except Exception as e:
         print(f"Error listing files: {e}")
@@ -255,6 +321,9 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
 
     if path == "config":
         return success_response(_config_directory_listing())
+
+    if not Config.BAMBU_SERIAL and path == "gcodes":
+        return success_response(_mock_directory_listing(path))
     
     # Determine actua FTPS path to check
     ftps_path = Config.BAMBU_FTPS_UPLOADS_DIR
@@ -292,14 +361,16 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
                 "dirname": f["name"],
                 "modified": f["modified"],
                 "size": f["size"],
-                "permissions": "rw"
+                "permissions": "rw",
+                "path": _join_moonraker_path(path, f["name"]),
             })
         else:
             files.append({
                 "filename": f["name"],
                 "modified": f["modified"],
                 "size": f["size"],
-                "permissions": "rw"
+                "permissions": "rw",
+                "path": _join_moonraker_path(path, f["name"]),
             })
     
     result = {
@@ -312,7 +383,8 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
         },
         "root_info": {
             "name": "gcodes",
-            "permissions": "rw"
+            "permissions": "rw",
+            "path": "gcodes",
         }
     }
     
@@ -849,10 +921,24 @@ async def handle_jsonrpc(
             ]
         }
 
+    elif method == "server.files.list":
+        params = request.get("params", {})
+        root = params.get("root", "gcodes")
+        try:
+            files = _build_file_list(root)
+            response["result"] = {"root": root, "files": files}
+        except Exception as e:
+            print(f"Error listing files: {e}")
+            response["result"] = {"root": root, "files": []}
+
     elif method == "server.files.get_directory":
         # Get file listing with caching
         params = request.get("params", {})
         path = params.get("path", "gcodes")
+
+        if not Config.BAMBU_SERIAL and path == "gcodes":
+            response["result"] = _mock_directory_listing(path)
+            return response
         
         # Determine actual FTPS path to check
         # Moonraker path is "gcodes/subdirectory", but we need relative for FTPS
@@ -899,14 +985,16 @@ async def handle_jsonrpc(
                     "dirname": f["name"],
                     "modified": f["modified"],
                     "size": f["size"],
-                    "permissions": "rw"
+                    "permissions": "rw",
+                    "path": _join_moonraker_path(path, f["name"]),
                 })
             else:
                 files.append({
                     "filename": f["name"],
                     "modified": f["modified"],
                     "size": f["size"],
-                    "permissions": "rw"
+                    "permissions": "rw",
+                    "path": _join_moonraker_path(path, f["name"]),
                 })
         
         response["result"] = {
@@ -919,7 +1007,8 @@ async def handle_jsonrpc(
             },
             "root_info": {
                 "name": "gcodes", # Always the root name, even for subdirs
-                "permissions": "rw"
+                "permissions": "rw",
+                "path": "gcodes",
             }
         }
 
