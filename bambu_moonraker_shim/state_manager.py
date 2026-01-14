@@ -12,7 +12,7 @@ class StateManager:
             "display_status": {"progress": 0.0, "message": ""},
             "heaters": {
                 "available_heaters": ["extruder", "heater_bed"],
-                "available_sensors": []
+                "available_sensors": ["extruder", "heater_bed"]
             },
             "print_stats": {
                 "state": "standby", # standby, printing, paused, complete, error, cancelling
