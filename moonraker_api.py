@@ -805,21 +805,10 @@ async def handle_jsonrpc(
             line = line.strip()
             if not line:
                 continue
-
-            line_upper = line.upper()
-            if line_upper == "CANCEL_PRINT":
-                await bambu_client.cancel_print()
-                continue
-            if line_upper == "PAUSE":
-                await bambu_client.pause_print()
-                continue
-            if line_upper == "RESUME":
-                await bambu_client.resume_print()
-                continue
             
             # Intercept SET_PIN command for LED control
             # Format: SET_PIN PIN=caselight VALUE=1.00
-            if line_upper.startswith("SET_PIN"):
+            if line.upper().startswith("SET_PIN"):
                 try:
                     parts = line.split()
                     pin_name = ""
