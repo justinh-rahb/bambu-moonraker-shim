@@ -769,10 +769,13 @@ async def handle_jsonrpc(
 
         await bambu_client.send_gcode_line(command.gcode)
 
+        speed_ratio = command.speed / 255.0 if command.speed > 0 else 0.0
         if command.target == FanTarget.PART:
-            await state_manager.update_state(
-                {"fan": {"speed": command.speed / 255.0 if command.speed > 0 else 0.0}}
-            )
+            await state_manager.update_state({"fan": {"speed": speed_ratio}})
+        elif command.target == FanTarget.AUX:
+            await state_manager.update_state({"fan_aux": {"speed": speed_ratio}})
+        elif command.target == FanTarget.CHAMBER:
+            await state_manager.update_state({"fan_chamber": {"speed": speed_ratio}})
 
         response["result"] = "ok"
 

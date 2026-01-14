@@ -140,6 +140,8 @@ The shim maps fan targets to Bambu's MQTT G-code format using the canonical name
 
 Fan speed values are clamped to `0..255`. Percent inputs (like `50%`) are converted to `0..255`. All commands are sent with a trailing newline to satisfy the printer's MQTT G-code requirements.
 
+The shim exposes `fan`, `fan_aux`, and `fan_chamber` objects so Mainsail can display and manipulate all three fans.
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.

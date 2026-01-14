@@ -8,6 +8,8 @@ class StateManager:
             "extruder": {"temperature": 0.0, "target": 0.0, "power": 0.0, "pressure_advance": 0.0, "smooth_time": 0.0},
             "heater_bed": {"temperature": 0.0, "target": 0.0, "power": 0.0},
             "fan": {"speed": 0.0},
+            "fan_aux": {"speed": 0.0},
+            "fan_chamber": {"speed": 0.0},
             "virtual_sdcard": {"progress": 0.0, "is_active": False, "file_position": 0},
             "display_status": {"progress": 0.0, "message": ""},
             "heaters": {
@@ -49,6 +51,12 @@ class StateManager:
                     "fan": {
                         "pin": "fan0"
                     },
+                    "fan_generic aux": {
+                        "pin": "fan1"
+                    },
+                    "fan_generic chamber": {
+                        "pin": "fan2"
+                    },
                     "virtual_sdcard": {
                         "path": "/tmp/gcodes"
                     },
@@ -79,6 +87,15 @@ class StateManager:
                         "min_temp": "0",
                         "max_temp": "120"
                     },
+                    "fan": {
+                        "pin": "fan0"
+                    },
+                    "fan_generic aux": {
+                        "pin": "fan1"
+                    },
+                    "fan_generic chamber": {
+                        "pin": "fan2"
+                    },
                     "virtual_sdcard": {
                         "path": "/tmp/gcodes"
                     },
@@ -99,6 +116,8 @@ class StateManager:
                 "progress": 0.0,
             },
             "fan": {"speed": 0.0},
+            "fan_aux": {"speed": 0.0},
+            "fan_chamber": {"speed": 0.0},
             "output_pin caselight": {
                 "value": 0.0
             },
