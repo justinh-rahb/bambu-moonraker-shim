@@ -1,12 +1,13 @@
 import asyncio
 import json
 import time
+import secrets
 import uuid
 import os
 import tempfile
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, UploadFile, File
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from state_manager import state_manager
 from bambu_client import bambu_client
 from config import Config
@@ -15,6 +16,97 @@ from ftps_client import ftps_client
 from sqlite_manager import get_sqlite_manager
 
 router = APIRouter()
+
+CONFIG_FILES = {
+    "printer.cfg": "\n".join(
+        [
+            "[printer]",
+            "kinematics: corexy",
+            "max_velocity: 500",
+            "max_accel: 10000",
+            "",
+            "[extruder]",
+            "min_temp: 0",
+            "max_temp: 300",
+            "nozzle_diameter: 0.4",
+            "",
+            "[heater_bed]",
+            "min_temp: 0",
+            "max_temp: 120",
+            "",
+            "[virtual_sdcard]",
+            "path: /tmp/gcodes",
+            "",
+            "[display_status]",
+            "",
+            "[pause_resume]",
+            "",
+            "[gcode_macro CANCEL_PRINT]",
+            "description: Cancel the actual running print",
+            "gcode:",
+            "  M117 Cancelled",
+            "",
+            "[gcode_macro PAUSE]",
+            "description: Pause the actual running print",
+            "gcode:",
+            "  M117 Paused",
+            "",
+            "[gcode_macro RESUME]",
+            "description: Resume the actual running print",
+            "gcode:",
+            "  M117 Resumed",
+            "",
+        ]
+    )
+}
+
+
+def _config_file_listing():
+    now = time.time()
+    files = []
+    for name, content in CONFIG_FILES.items():
+        files.append(
+            {
+                "path": f"config/{name}",
+                "size": len(content.encode("utf-8")),
+                "modified": now,
+            }
+        )
+    return files
+
+
+def _config_directory_listing():
+    now = time.time()
+    files = []
+    for name, content in CONFIG_FILES.items():
+        files.append(
+            {
+                "filename": name,
+                "modified": now,
+                "size": len(content.encode("utf-8")),
+                "permissions": "rw",
+            }
+        )
+    return {
+        "dirs": [],
+        "files": files,
+        "disk_usage": {
+            "total": 32 * 1024 * 1024 * 1024,  # 32GB
+            "used": 1 * 1024 * 1024 * 1024,  # 1GB
+            "free": 31 * 1024 * 1024 * 1024,  # 31GB
+        },
+        "root_info": {
+            "name": "config",
+            "permissions": "rw",
+        },
+    }
+
+
+@router.get("/access/oneshot_token")
+async def access_oneshot_token():
+    token = secrets.token_urlsafe(32)
+    expires = int(time.time()) + 60
+    return success_response({"token": token, "expires": expires})
 
 
 # --- HTTP Helpers ---
@@ -126,7 +218,7 @@ async def objects_query(request: Request):
 @router.get("/server/files/list")
 async def file_list(root: str = "gcodes"):
     if root == "config":
-        return success_response([])
+        return success_response(_config_file_listing())
 
     try:
         # List files from printer via FTPS
@@ -160,6 +252,9 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
     Used by Mainsail's file browser.
     """
     sqlite_manager = get_sqlite_manager()
+
+    if path == "config":
+        return success_response(_config_directory_listing())
     
     # Determine actua FTPS path to check
     ftps_path = Config.BAMBU_FTPS_UPLOADS_DIR
@@ -286,6 +381,10 @@ async def file_download(root: str, path: str):
     if root == "config" and ".theme" in path:
         # Return empty JSON for theme files to satisfy Mainsail
         return success_response({})
+    if root == "config":
+        content = CONFIG_FILES.get(path)
+        if content is not None:
+            return PlainTextResponse(content)
 
     # Generic 404 for now unless checked against real files
     return error_response(404, "File not found")
