@@ -304,11 +304,11 @@ async def objects_query(request: Request):
 async def file_list(root: str = "gcodes"):
     try:
         files = _build_file_list(root)
-        return success_response({"root": root, "files": files})
+        return success_response(files)
     except Exception as e:
         print(f"Error listing files: {e}")
         # Return empty list on error rather than failing
-        return success_response({"root": root, "files": []})
+        return success_response([])
 
 
 @router.get("/server/files/directory")
