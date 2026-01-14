@@ -74,18 +74,5 @@ class DatabaseManager:
         if updated:
             self._save()
 
-    def ensure_temperature_panel(self):
-        def ensure_panel(layout_key: str):
-            layout = self.get_item("mainsail", layout_key)
-            if layout is None:
-                layout = []
-            if isinstance(layout, list):
-                if not any(panel.get("name") == "temperature" for panel in layout):
-                    layout = [{"name": "temperature", "visible": True}] + layout
-                    self.post_item("mainsail", layout_key, layout)
-
-        ensure_panel("dashboard.desktopLayout1")
-        ensure_panel("dashboard.tabletLayout1")
-
 # Global instance
 database_manager = DatabaseManager()

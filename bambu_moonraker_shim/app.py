@@ -23,7 +23,6 @@ app.include_router(moonraker_router)
 async def startup_event():
     print("Starting Bambu Moonraker Shim...")
     database_manager.ensure_namespaces(["fluidd"])
-    database_manager.ensure_temperature_panel()
     # Start the Bambu Client (MQTT loop)
     await bambu_client.start()
 
