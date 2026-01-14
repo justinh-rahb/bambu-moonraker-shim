@@ -46,7 +46,13 @@ class StateManager:
                     "display_status": {},
                     "gcode_macro pause": {},
                     "gcode_macro resume": {},
-                    "gcode_macro cancel_print": {}
+                    "gcode_macro cancel_print": {},
+                    "output_pin caselight": {
+                         "pin": "gpio1",
+                         "pwm": False,
+                         "value": 0,
+                         "shutdown_value": 0
+                    }
                 },
                 "config": {
                      "printer": {
@@ -83,6 +89,9 @@ class StateManager:
                 "progress": 0.0,
             },
             "fan": {"speed": 0.0},
+            "output_pin caselight": {
+                "value": 0.0
+            },
             "webhooks": {
                 "state": "ready",
                 "state_message": "Printer is ready"

@@ -143,6 +143,7 @@ class BambuClient:
             print("Cannot send command: MQTT disconnected.")
             return
 
+        print(f"Sending MQTT Command: {json.dumps(command)}")
         topic = f"device/{self.serial}/request"
         payload = json.dumps(command)
         await self._mqtt_client.publish(topic, payload)
@@ -186,6 +187,37 @@ class BambuClient:
             }
         }
         await self.publish_command(cmd)
+
+    async def set_light(self, on: bool):
+        """Turns the chamber light on or off using MQTT."""
+        # Send both 'print' and 'system' variants to ensure compatibility
+        cmd_print = {
+            "print": {
+                "sequence_id": "0",
+                "command": "ledctrl",
+                "led_node": "chamber_light",
+                "led_mode": "on" if on else "off",
+                "led_on_time": 500,
+                "led_off_time": 500,
+                "loop_times": 0,
+                "interval_time": 0
+            }
+        }
+        await self.publish_command(cmd_print)
+        
+        cmd_system = {
+            "system": {
+                "sequence_id": "0",
+                "command": "ledctrl",
+                "led_node": "chamber_light",
+                "led_mode": "on" if on else "off",
+                "led_on_time": 500,
+                "led_off_time": 500,
+                "loop_times": 0,
+                "interval_time": 0
+            }
+        }
+        await self.publish_command(cmd_system)
 
     # --- Mock Mode ---
     async def _mock_loop(self):

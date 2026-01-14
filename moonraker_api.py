@@ -703,10 +703,34 @@ async def handle_jsonrpc(
         lines = script.split("\n")
         for line in lines:
             line = line.strip()
-            if line:
-                # Basic logging for now
-                print(f"Executing G-code: {line}")
-                await bambu_client.send_gcode_line(line)
+            if not line:
+                continue
+            
+            # Intercept SET_PIN command for LED control
+            # Format: SET_PIN PIN=caselight VALUE=1.00
+            if line.upper().startswith("SET_PIN"):
+                try:
+                    parts = line.split()
+                    pin_name = ""
+                    value = 0.0
+                    for part in parts:
+                        if part.upper().startswith("PIN="):
+                            pin_name = part.split("=")[1]
+                        elif part.upper().startswith("VALUE="):
+                            value = float(part.split("=")[1])
+                    
+                    if pin_name == "caselight":
+                        is_on = value > 0
+                        await bambu_client.set_light(is_on)
+                        # Updates state locally so UI reflects change immediately
+                        await state_manager.update_state({"output_pin caselight": {"value": 1.0 if is_on else 0.0}})
+                        continue # Don't send this to printer as raw gcode
+                except Exception as e:
+                    print(f"Error parsing SET_PIN: {e}")
+
+            # Basic logging for now
+            print(f"Executing G-code: {line}")
+            await bambu_client.send_gcode_line(line)
         response["result"] = "ok"
 
     elif method == "server.files.roots":
