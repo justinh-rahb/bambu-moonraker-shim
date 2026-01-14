@@ -70,6 +70,7 @@ def _config_file_listing():
                 "path": f"config/{name}",
                 "size": len(content.encode("utf-8")),
                 "modified": now,
+                "permissions": "rw",
             }
         )
     return files
@@ -129,7 +130,8 @@ def _build_file_list(root: str) -> List[Dict[str, Any]]:
                 files.append({
                     "path": _join_moonraker_path("gcodes", name),
                     "size": f["size"],
-                    "modified": f["modified"]
+                    "modified": f["modified"],
+                    "permissions": "rw",
                 })
 
     return files
