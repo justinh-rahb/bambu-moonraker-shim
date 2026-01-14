@@ -12,6 +12,7 @@ from bambu_moonraker_shim.state_manager import state_manager
 from bambu_moonraker_shim.bambu_client import bambu_client
 from bambu_moonraker_shim.config import Config
 from bambu_moonraker_shim.database_manager import database_manager
+from bambu_moonraker_shim.fan_control import FanTarget, build_fan_command
 from bambu_moonraker_shim.ftps_client import ftps_client
 from bambu_moonraker_shim.sqlite_manager import get_sqlite_manager
 
@@ -755,6 +756,36 @@ async def handle_jsonrpc(
     elif method == "server.gcode_store":
         response["result"] = {"gcode_store": []}
 
+    elif method == "printer.fan.set_speed":
+        params = request.get("params", {})
+        fan_name = params.get("fan")
+        speed = params.get("speed")
+
+        try:
+            command = build_fan_command(fan_name, speed)
+        except ValueError as exc:
+            response["error"] = {"code": 400, "message": str(exc)}
+            return response
+
+        await bambu_client.send_gcode_line(command.gcode)
+
+        speed_ratio = command.speed / 255.0 if command.speed > 0 else 0.0
+        if command.target == FanTarget.PART:
+            await state_manager.update_state({"fan": {"speed": speed_ratio}})
+        elif command.target == FanTarget.AUX:
+            await state_manager.update_state(
+                {"fan_generic aux": {"speed": speed_ratio}, "fan_aux": {"speed": speed_ratio}}
+            )
+        elif command.target == FanTarget.CHAMBER:
+            await state_manager.update_state(
+                {
+                    "fan_generic chamber": {"speed": speed_ratio},
+                    "fan_chamber": {"speed": speed_ratio},
+                }
+            )
+
+        response["result"] = "ok"
+
     elif method == "server.webcams.list":
         # Retrieve webcams from database
         # We'll store them in namespace "moonraker", key "webcams" as a list
@@ -899,6 +930,41 @@ async def handle_jsonrpc(
                         continue # Don't send this to printer as raw gcode
                 except Exception as e:
                     print(f"Error parsing SET_PIN: {e}")
+
+            # Intercept SET_FAN_SPEED for fan control
+            # Format: SET_FAN_SPEED FAN=<name> SPEED=<value>
+            if line.upper().startswith("SET_FAN_SPEED"):
+                try:
+                    parts = line.split()
+                    fan_name = None
+                    speed = None
+                    for part in parts:
+                        upper = part.upper()
+                        if upper.startswith("FAN="):
+                            fan_name = part.split("=", 1)[1]
+                        elif upper.startswith("SPEED="):
+                            speed = part.split("=", 1)[1]
+
+                    command = build_fan_command(fan_name, speed)
+                    await bambu_client.send_gcode_line(command.gcode)
+
+                    speed_ratio = command.speed / 255.0 if command.speed > 0 else 0.0
+                    if command.target == FanTarget.PART:
+                        await state_manager.update_state({"fan": {"speed": speed_ratio}})
+                    elif command.target == FanTarget.AUX:
+                        await state_manager.update_state(
+                            {"fan_generic aux": {"speed": speed_ratio}, "fan_aux": {"speed": speed_ratio}}
+                        )
+                    elif command.target == FanTarget.CHAMBER:
+                        await state_manager.update_state(
+                            {
+                                "fan_generic chamber": {"speed": speed_ratio},
+                                "fan_chamber": {"speed": speed_ratio},
+                            }
+                        )
+                    continue # Don't send this to printer as raw gcode
+                except Exception as e:
+                    print(f"Error parsing SET_FAN_SPEED: {e}")
 
             # Basic logging for now
             print(f"Executing G-code: {line}")
