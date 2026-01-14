@@ -4,8 +4,8 @@ import ssl
 import time
 from typing import Optional, Dict, Any
 import aiomqtt
-from config import Config
-from state_manager import state_manager
+from bambu_moonraker_shim.config import Config
+from bambu_moonraker_shim.state_manager import state_manager
 
 class BambuClient:
     def __init__(self):

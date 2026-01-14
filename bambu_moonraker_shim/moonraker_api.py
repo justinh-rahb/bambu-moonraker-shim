@@ -8,12 +8,12 @@ import tempfile
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, UploadFile, File
 from fastapi.responses import JSONResponse, PlainTextResponse
-from state_manager import state_manager
-from bambu_client import bambu_client
-from config import Config
-from database_manager import database_manager
-from ftps_client import ftps_client
-from sqlite_manager import get_sqlite_manager
+from bambu_moonraker_shim.state_manager import state_manager
+from bambu_moonraker_shim.bambu_client import bambu_client
+from bambu_moonraker_shim.config import Config
+from bambu_moonraker_shim.database_manager import database_manager
+from bambu_moonraker_shim.ftps_client import ftps_client
+from bambu_moonraker_shim.sqlite_manager import get_sqlite_manager
 
 router = APIRouter()
 
