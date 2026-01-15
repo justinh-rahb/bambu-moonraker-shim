@@ -98,10 +98,10 @@ class BambuClient:
 
         # Fan
         if "cooling_fan_speed" in data:
-            # Bambu sends 0-15 (sometimes strings), map to 0.0-1.0
+            # Bambu sends 0-15 (sometimes strings), but if on/off only, expose as 100%.
             try:
                 speed = float(data.get("cooling_fan_speed", 0))
-                updates["fan"] = {"speed": speed / 15.0 if speed > 0 else 0.0}
+                updates["fan"] = {"speed": 1.0 if speed > 0 else 0.0}
             except:
                 pass
 
