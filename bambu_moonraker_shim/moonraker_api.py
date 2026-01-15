@@ -998,21 +998,25 @@ async def handle_jsonrpc(
                     parts = line.split()
                     heater_name = None
                     target = None
+                    wait = False
                     for part in parts:
                         upper = part.upper()
                         if upper.startswith("HEATER="):
                             heater_name = part.split("=", 1)[1]
                         elif upper.startswith("TARGET="):
                             target = float(part.split("=", 1)[1])
+                        elif upper.startswith("WAIT="):
+                            wait_value = part.split("=", 1)[1].strip().lower()
+                            wait = wait_value in {"1", "true", "yes", "on"}
 
                     if heater_name is None or target is None:
                         continue
 
                     if heater_name == "extruder":
-                        await bambu_client.set_nozzle_temp(target, wait=False)
+                        await bambu_client.set_nozzle_temp(target, wait=wait)
                         await state_manager.update_state({"extruder": {"target": target}})
                     elif heater_name in ("heater_bed", "bed"):
-                        await bambu_client.set_bed_temp(target, wait=False)
+                        await bambu_client.set_bed_temp(target, wait=wait)
                         await state_manager.update_state({"heater_bed": {"target": target}})
                     continue
                 except Exception as e:
