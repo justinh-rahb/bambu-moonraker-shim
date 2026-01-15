@@ -171,10 +171,11 @@ class BambuFTPSClient:
     def upload_file(self, local_path: str, remote_filename: str):
         """Uploads a local file to the printer."""
         self.connect()
-        target_path = f"{Config.BAMBU_FTPS_UPLOADS_DIR.rstrip('/')}/{remote_filename}"
+        target_path = f"{Config.BAMBU_FTPS_UPLOADS_DIR.rstrip('/')}/{remote_filename}".replace("//", "/")
         print(f"Uploading {local_path} to {target_path}...")
         
         try:
+            self._ensure_remote_dirs(target_path)
             with open(local_path, "rb") as fp:
                 # Use storbinary to upload
                 self.ftp.storbinary(f"STOR {target_path}", fp)
@@ -192,6 +193,20 @@ class BambuFTPSClient:
             # Force reconnect on any error
             self.ftp = None
             raise
+
+    def _ensure_remote_dirs(self, full_remote_path: str):
+        parts = full_remote_path.strip("/").split("/")
+        if len(parts) <= 1:
+            return
+
+        parent_parts = parts[:-1]
+        current = ""
+        for part in parent_parts:
+            current += f"/{part}"
+            try:
+                self.ftp.mkd(current)
+            except Exception:
+                pass
 
     def delete_file(self, remote_filename: str):
         """Deletes a file on the printer."""

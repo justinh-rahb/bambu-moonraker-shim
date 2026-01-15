@@ -224,6 +224,42 @@ class BambuClient:
         }
         await self.publish_command(cmd_system)
 
+    async def start_print(self, filename: str) -> bool:
+        """
+        Attempt to start printing a file that already exists on the printer (uploaded via FTPS).
+        filename should be relative under the printer's upload root.
+        Returns True if command was published.
+        """
+        if not filename:
+            return False
+
+        if filename.startswith("gcodes/"):
+            filename = filename[len("gcodes/"):]
+
+        filename = filename.lstrip("/")
+
+        cmd_project_file = {
+            "print": {
+                "sequence_id": "0",
+                "command": "project_file",
+                "param": {
+                    "file": filename
+                }
+            }
+        }
+
+        cmd_start = {
+            "print": {
+                "sequence_id": "0",
+                "command": "start",
+                "param": filename
+            }
+        }
+
+        await self.publish_command(cmd_project_file)
+        await self.publish_command(cmd_start)
+        return True
+
     # --- Mock Mode ---
     async def _mock_loop(self):
         print("Starting Mock Bambu Printer loop...")
