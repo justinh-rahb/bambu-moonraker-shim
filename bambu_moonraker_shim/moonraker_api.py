@@ -991,6 +991,33 @@ async def handle_jsonrpc(
                 except Exception as e:
                     print(f"Heater parse error: {e}")
 
+            # Intercept SET_HEATER_TEMPERATURE for Moonraker compatibility
+            # Format: SET_HEATER_TEMPERATURE HEATER=<name> TARGET=<value>
+            if line.upper().startswith("SET_HEATER_TEMPERATURE"):
+                try:
+                    parts = line.split()
+                    heater_name = None
+                    target = None
+                    for part in parts:
+                        upper = part.upper()
+                        if upper.startswith("HEATER="):
+                            heater_name = part.split("=", 1)[1]
+                        elif upper.startswith("TARGET="):
+                            target = float(part.split("=", 1)[1])
+
+                    if heater_name is None or target is None:
+                        continue
+
+                    if heater_name == "extruder":
+                        await bambu_client.set_nozzle_temp(target, wait=False)
+                        await state_manager.update_state({"extruder": {"target": target}})
+                    elif heater_name in ("heater_bed", "bed"):
+                        await bambu_client.set_bed_temp(target, wait=False)
+                        await state_manager.update_state({"heater_bed": {"target": target}})
+                    continue
+                except Exception as e:
+                    print(f"SET_HEATER_TEMPERATURE parse error: {e}")
+
             # Basic logging for now
             print(f"Executing G-code: {line}")
             await bambu_client.send_gcode_line(line)
