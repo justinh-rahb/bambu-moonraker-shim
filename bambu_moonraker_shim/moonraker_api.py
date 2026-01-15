@@ -394,23 +394,27 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
 
 @router.post("/server/files/upload")
 async def file_upload(
+    request: Request,
     file: UploadFile = File(...),
-    root: str = Form("gcodes"),
+    root: Optional[str] = Form(None),
     path: Optional[str] = Form(None),
     print: Optional[str] = Form(None),
     filename: Optional[str] = Form(None),
 ):
     try:
-        if root != "gcodes":
-            return error_response(400, f"Unsupported root: {root}")
+        query_params = request.query_params
+        root_value = root or query_params.get("root") or "gcodes"
+        if root_value != "gcodes":
+            return error_response(400, f"Unsupported root: {root_value}")
 
-        safe_name = filename or file.filename
+        safe_name = filename or query_params.get("filename") or file.filename
         if not safe_name:
             return error_response(400, "Missing filename")
 
+        path_value = path or query_params.get("path")
         remote_rel = safe_name
-        if path:
-            remote_rel = f"{path.strip('/')}/{safe_name}"
+        if path_value:
+            remote_rel = f"{path_value.strip('/')}/{safe_name}"
 
         # Save uploaded file to a temp location first
         temp_fd, temp_path = tempfile.mkstemp(suffix=".gcode")
@@ -427,7 +431,8 @@ async def file_upload(
             sqlite_manager = get_sqlite_manager()
             sqlite_manager.clear_file_cache()
 
-            want_print = (print or "").lower() == "true"
+            print_value = print or query_params.get("print")
+            want_print = (print_value or "").lower() == "true"
             print_started = False
             if want_print:
                 print_started = await bambu_client.start_print(remote_rel)
