@@ -403,15 +403,23 @@ async def file_upload(
 ):
     try:
         query_params = request.query_params
-        root_value = root or query_params.get("root") or "gcodes"
+        root_value = (root or query_params.get("root") or "gcodes").strip()
+        root_value = root_value.strip("/").lower()
+        if root_value.startswith("gcodes/"):
+            root_suffix = root_value[len("gcodes/"):].strip("/")
+            path = f"{root_suffix}/{path}" if path else root_suffix
+            root_value = "gcodes"
         if root_value != "gcodes":
             return error_response(400, f"Unsupported root: {root_value}")
 
         safe_name = filename or query_params.get("filename") or file.filename
-        if not safe_name:
-            return error_response(400, "Missing filename")
-
         path_value = path or query_params.get("path")
+        if not safe_name and path_value:
+            safe_name = os.path.basename(path_value)
+            path_value = os.path.dirname(path_value)
+        if not safe_name:
+            safe_name = "upload.gcode"
+
         remote_rel = safe_name
         if path_value:
             remote_rel = f"{path_value.strip('/')}/{safe_name}"
