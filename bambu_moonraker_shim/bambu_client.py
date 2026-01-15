@@ -193,6 +193,18 @@ class BambuClient:
         }
         await self.publish_command(cmd)
 
+    async def set_nozzle_temp(self, temp_c: float, wait: bool = False):
+        t = int(round(float(temp_c)))
+        cmd = Config.BAMBU_NOZZLE_SET_WAIT_CMD if wait else Config.BAMBU_NOZZLE_SET_CMD
+        gcode = f"{cmd} S{t}\n"
+        await self.send_gcode_line(gcode)
+
+    async def set_bed_temp(self, temp_c: float, wait: bool = False):
+        t = int(round(float(temp_c)))
+        cmd = Config.BAMBU_BED_SET_WAIT_CMD if wait else Config.BAMBU_BED_SET_CMD
+        gcode = f"{cmd} S{t}\n"
+        await self.send_gcode_line(gcode)
+
     async def set_light(self, on: bool):
         """Turns the chamber light on or off using MQTT."""
         # Send both 'print' and 'system' variants to ensure compatibility

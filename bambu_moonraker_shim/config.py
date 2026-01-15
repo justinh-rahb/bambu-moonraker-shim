@@ -24,8 +24,29 @@ class Config:
     BAMBU_FTPS_PASS = os.getenv("BAMBU_FTPS_PASS", BAMBU_ACCESS_CODE)
     BAMBU_FTPS_UPLOADS_DIR = os.getenv("BAMBU_FTPS_UPLOADS_DIR", "/")
 
+    # Heater commands
+    BAMBU_NOZZLE_SET_CMD = os.getenv("BAMBU_NOZZLE_SET_CMD", "M104")
+    BAMBU_NOZZLE_SET_WAIT_CMD = os.getenv("BAMBU_NOZZLE_SET_WAIT_CMD", "M109")
+    BAMBU_BED_SET_CMD = os.getenv("BAMBU_BED_SET_CMD", "M140")
+    BAMBU_BED_SET_WAIT_CMD = os.getenv("BAMBU_BED_SET_WAIT_CMD", "M190")
+
     # Paths
     GCODES_DIR = os.getenv("GCODES_DIR", "gcodes")
+
+_ALLOWED_HEATER_CMDS = {"M104", "M109", "M140", "M190"}
+
+
+def _validate_heater_cmd(env_name: str, value: str) -> None:
+    if value not in _ALLOWED_HEATER_CMDS:
+        raise ValueError(
+            f"{env_name} must be one of {sorted(_ALLOWED_HEATER_CMDS)} (got {value!r})."
+        )
+
+
+_validate_heater_cmd("BAMBU_NOZZLE_SET_CMD", Config.BAMBU_NOZZLE_SET_CMD)
+_validate_heater_cmd("BAMBU_NOZZLE_SET_WAIT_CMD", Config.BAMBU_NOZZLE_SET_WAIT_CMD)
+_validate_heater_cmd("BAMBU_BED_SET_CMD", Config.BAMBU_BED_SET_CMD)
+_validate_heater_cmd("BAMBU_BED_SET_WAIT_CMD", Config.BAMBU_BED_SET_WAIT_CMD)
 
 # Ensure gcodes directory exists
 if not os.path.exists(Config.GCODES_DIR):

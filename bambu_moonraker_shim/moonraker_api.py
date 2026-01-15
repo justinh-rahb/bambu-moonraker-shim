@@ -966,6 +966,31 @@ async def handle_jsonrpc(
                 except Exception as e:
                     print(f"Error parsing SET_FAN_SPEED: {e}")
 
+            # Intercept heater commands (M104/M109/M140/M190)
+            if line.upper().startswith(("M104", "M109", "M140", "M190")):
+                try:
+                    parts = line.upper().split()
+                    cmd = parts[0]
+                    temp = None
+                    for part in parts:
+                        if part.startswith("S"):
+                            temp = float(part[1:])
+                            break
+
+                    if temp is None:
+                        continue
+
+                    if cmd in ("M104", "M109"):
+                        await bambu_client.set_nozzle_temp(temp, wait=(cmd == "M109"))
+                        await state_manager.update_state({"extruder": {"target": temp}})
+                    elif cmd in ("M140", "M190"):
+                        await bambu_client.set_bed_temp(temp, wait=(cmd == "M190"))
+                        await state_manager.update_state({"heater_bed": {"target": temp}})
+
+                    continue
+                except Exception as e:
+                    print(f"Heater parse error: {e}")
+
             # Basic logging for now
             print(f"Executing G-code: {line}")
             await bambu_client.send_gcode_line(line)
