@@ -1,147 +1,228 @@
+> [!WARNING] 
+> **DISCLAIMER**
+>
+> This project is an **unofficial, experimental shim** that communicates with Bambu Lab printers using their documented and undocumented LAN interfaces.
+>
+> - This is **NOT** supported by Bambu Lab.
+> - This project may break with firmware updates.
+> - There is **NO WARRANTY** of safety, correctness, or fitness for any purpose.
+> - You are responsible for **anything that happens to your printer** while using this software.
+>
+> By using this project, you acknowledge that you are doing so **at your own risk**.
+> If that makes you uncomfortable, this project is not for you.
+
 # Bambu Moonraker Shim
 
-A lightweight shim that bridges Bambu Lab printers (P1/X1 series) to Mainsail (and potentially other Moonraker clients) by emulating a subset of the Moonraker API.
+A lightweight shim that bridges **Bambu Lab printers** (P1 / X1 / A1 series) to **Mainsail** (and potentially other Moonraker clients) by emulating a **subset** of the Moonraker API.
 
-This project allows you to use the beautiful Mainsail UI to monitor and control your Bambu printer without rooting it or installing full Klipper.
+This allows you to use the Mainsail UI to **monitor and partially control** a Bambu printer **without rooting it, flashing firmware, or installing Klipper**.
 
-## Features
+## What This Project Is (and Is Not)
 
-- **Connection**: Connects to the Bambu Printer via MQTT (LAN Mode or Cloud).
-- **Moonraker API**: Emulates key Moonraker HTTP and WebSocket endpoints/methods.
-- **Monitoring**:
-    - Live temperatures (Extruder, Bed).
-    - Print status (Printing, Paused, Ready).
-    - Job progress and remaining time.
-    - Filename display.
-- **Control**:
-    - Pause, Resume, and Cancel prints.
-    - Start prints (basic implementation).
-    - Fan control for part, aux, and chamber fans.
-- **Files**:
-    - Basic file listing (mocked/local).
-    - File upload (stubbed).
+**This is:**
+
+* A protocol shim
+* A compatibility layer
+* A “Moonraker impersonator” that translates requests to Bambu’s LAN MQTT / FTPS interfaces
+
+**This is not:**
+
+* Klipper
+* A firmware replacement
+* A complete Moonraker implementation
+* Endorsed or supported by Bambu Lab
+
+## Features (Current State)
+
+### Connection
+
+* Connects to Bambu printers over **LAN MQTT**
+* Supports **LAN mode** (cloud mode is experimental)
+
+### Monitoring (Working)
+
+* Live temperature **display**:
+
+  * Extruder
+  * Bed
+* Print state:
+
+  * Ready
+  * Printing
+  * Paused
+  * Complete
+* Job progress
+* Currently loaded filename
+
+### Control (Working)
+
+* Manual G-code command sending (limited)
+* XYZ movement
+* Homing
+* Pause / Resume / Cancel prints
+* Start prints (basic implementation)
+* Fan control:
+
+  * Part cooling
+  * Auxiliary
+  * Chamber / exhaust
+* Chamber LED on / off
+
+### Files (Partial / Experimental)
+
+* File listing (via printer FTPS)
+* File upload (via FTPS)
+
+## What Does NOT Work (Yet)
+
+* ❌ Setting heater target temperatures (display only)
+* ❌ Full interactive G-code console
+* ❌ Klipper macros
+* ❌ Webcam bridging
+* ❌ Job queueing
+* ❌ Full Moonraker API parity
+
+If you are expecting a drop-in Klipper replacement, this is not that.
 
 ## Prerequisites
 
-- **Python 3.9+**
-- **Mainsail**: A running instance of Mainsail (e.g., in a Docker container or hosted).
-- **Bambu Printer**: A P1P, P1S, X1C, or A1 printer.
+* **Python 3.9+**
+* **Mainsail**
+* **Bambu Lab printer**:
+
+  * P1P
+  * P1S
+  * X1 / X1C
+  * A1 (experimental)
 
 ## Installation
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/justinh-rahb/bambu-moonraker-shim.git
-    cd bambu-moonraker-shim
-    ```
+1. **Clone the repository**
 
-2.  **Create a virtual environment (recommended):**
-    ```bash
-    python -m venv venv
-    source venv/bin/activate  # On Windows: venv\Scripts\activate
-    ```
+   ```bash
+   git clone https://github.com/justinh-rahb/bambu-moonraker-shim.git
+   cd bambu-moonraker-shim
+   ```
 
-3.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+2. **Create a virtual environment (recommended)**
+
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # Windows: venv\Scripts\activate
+   ```
+
+3. **Install dependencies**
+
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 ## Configuration
 
-Create a `.env` file in the root directory by copying the example or using the template below:
+Create a `.env` file in the project root:
 
 ```bash
 # Bambu Printer Config
-# Printer IP Address
 BAMBU_HOST=192.168.1.100
-# LAN Access Code (found on printer screen)
 BAMBU_ACCESS_CODE=12345678
-# Printer Serial Number
 BAMBU_SERIAL=01P00A12345678
 
 # Connection Mode
-# 'local' (LAN) or 'cloud' (not fully tested)
 BAMBU_MODE=local
 
 # Server Config
 HTTP_PORT=7125
 LOG_LEVEL=INFO
-# Directory to store uploaded gcodes
 GCODES_DIR=gcodes
 ```
 
 ## Usage
 
-1.  **Start the Shim:**
-    ```bash
-    python main.py
-    ```
-    The server will start on `http://0.0.0.0:7125`.
+1. **Start the shim**
 
-2.  **Configure Mainsail:**
-    - Open your Mainsail instance.
-    - Go to **Settings** -> **Printers**.
-    - Add a new printer.
-    - Set the **URL** to the IP address of the machine running this shim (e.g., `192.168.1.50`).
-    - The port is `7125` by default, which Mainsail expects.
+   ```bash
+   python main.py
+   ```
 
-3.  **Enjoy:** Mainsail should connect, show the printer as "Ready" or "Printing," and display temperatures.
+2. **Configure Mainsail**
+
+   * Open Mainsail
+   * Go to **Settings → Printers**
+   * Add a new printer
+   * Set the URL to the machine running the shim (e.g. `http://192.168.1.50:7125`)
+
+3. **Connect**
+
+   * Mainsail should connect
+   * The printer should appear as Ready / Printing
+   * Temperatures and basic controls should function
 
 ## Docker
 
-Build a container image that bundles this shim with a fully baked copy of the Mainsail UI (served via Nginx and proxied to the shim):
+A Docker image is provided that bundles:
+
+* This shim
+* Mainsail UI
+* Nginx reverse proxy
+
+### Build
 
 ```bash
 docker build -t bambu-moonraker-shim .
 ```
 
-> **Tip:** Override the bundled UI by supplying build args, e.g. `docker build --build-arg MAINSAIL_VERSION=2.18.0 --build-arg MAINSAIL_SHA256=<sha> ...`.
-
-Run the image, providing your usual `.env` values (or individual `-e` flags). The container exposes port 80 for the combined UI+API surface:
+### Run
 
 ```bash
 docker run \
-    --env-file .env \
-    -p 8080:80 \
-    bambu-moonraker-shim
+  --env-file .env \
+  -p 8080:80 \
+  bambu-moonraker-shim
 ```
 
-Open `http://localhost:8080` to access Mainsail. All API/WebSocket traffic is already proxied to the shim—no extra printer configuration inside Mainsail is required.
+Access Mainsail at:
 
-### Networking (Bridge vs Host)
+```
+http://localhost:8080
+```
 
-The shim must reach `BAMBU_HOST` directly. If your Docker host can’t access the printer network from the default bridge, run the container in host mode:
+### Networking Notes
+
+The container **must be able to reach the printer IP directly**.
+
+If bridge networking causes issues, use host mode:
 
 ```bash
 docker run \
-    --env-file .env \
-    --network host \
-    bambu-moonraker-shim
+  --env-file .env \
+  --network host \
+  bambu-moonraker-shim
 ```
-
-With `--network host`, omit `-p` (nginx listens on port 80, the shim on 7125). If you stick with bridge mode, ensure the host can resolve the printer IP or set `--add-host printer:192.168.2.240` when you run the container.
-
-## Limitations / TODO
-
-- **No full G-Code support**: You cannot send raw G-code commands via the console yet.
-- **File Management**: File management is currently local to the shim, not synced with the printer's SD card.
-- **Webcams**: No webcam stream bridging is implemented yet.
-- **Macros**: Klipper macros are not supported.
 
 ## Fan Control
 
-The shim maps fan targets to Bambu's MQTT G-code format using the canonical names below:
+The shim maps Mainsail fan controls to Bambu’s MQTT G-code interface:
 
-| Canonical fan | G-code    | Notes                  |
-| ------------ | --------- | ---------------------- |
-| `part`       | `M106 P1` | Toolhead part cooling  |
-| `aux`        | `M106 P2` | Auxiliary side fan     |
-| `chamber`    | `M106 P3` | Chamber/exhaust fan    |
+| Fan       | G-code    | Description           |
+| --------- | --------- | --------------------- |
+| `part`    | `M106 P1` | Part cooling fan      |
+| `aux`     | `M106 P2` | Auxiliary fan         |
+| `chamber` | `M106 P3` | Chamber / exhaust fan |
 
-Fan speed values are clamped to `0..255`. Percent inputs (like `50%`) are converted to `0..255`. All commands are sent with a trailing newline to satisfy the printer's MQTT G-code requirements.
+* Fan speeds are clamped to `0–255`
+* Percent inputs are converted automatically
+* All commands are sent with a trailing newline (required by Bambu MQTT)
 
-The shim exposes `fan_generic aux` and `fan_generic chamber` objects (alongside `fan`) so Mainsail can display and manipulate all three fans. It also mirrors values into `fan_aux` and `fan_chamber` for internal use.
+## Limitations / Roadmap
+
+* Heater target control
+* Safer / richer G-code handling
+* Webcam bridging
+* More complete Moonraker API coverage
+* Better error handling and state reconciliation
+
+This project is evolving quickly and may break at any time.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE).
