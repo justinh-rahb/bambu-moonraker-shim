@@ -17,6 +17,8 @@ A lightweight shim that bridges **Bambu Lab printers** (P1 / X1 / A1 series) to 
 
 This allows you to use the Mainsail UI to **monitor and partially control** a Bambu printer **without rooting it, flashing firmware, or installing Klipper**.
 
+![Shambu](docs/screenshot.png)
+
 ## What This Project Is (and Is Not)
 
 **This is:**
