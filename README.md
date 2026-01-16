@@ -37,7 +37,7 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
 ### Connection
 
 * Connects to Bambu printers over **LAN MQTT**
-* Supports **LAN mode** (cloud mode is experimental)
+* Supports **LAN mode**
 
 ### Monitoring (Working)
 
@@ -59,8 +59,6 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
 * Manual G-code command sending (limited)
 * XYZ movement
 * Homing
-* Pause / Resume / Cancel prints
-* Start prints (basic implementation)
 * Fan control:
 
   * Part cooling
@@ -75,6 +73,8 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
 
 ## What Does NOT Work (Yet)
 
+* ❌ Pause / Resume / Cancel prints
+* ❌ Start prints (basic implementation)
 * ❌ Setting heater target temperatures (display only)
 * ❌ Full interactive G-code console
 * ❌ Klipper macros
@@ -183,7 +183,7 @@ docker run \
 Access Mainsail at:
 
 ```
-http://localhost:8080
+http://localhost
 ```
 
 ### Networking Notes
@@ -217,6 +217,8 @@ The shim maps Mainsail fan controls to Bambu’s MQTT G-code interface:
 
 * Heater target control
 * Safer / richer G-code handling
+* Printing
+* Uploaded files list
 * Webcam bridging
 * More complete Moonraker API coverage
 * Better error handling and state reconciliation
