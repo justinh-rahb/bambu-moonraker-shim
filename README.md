@@ -183,7 +183,7 @@ docker run \
 Access Mainsail at:
 
 ```
-http://localhost
+http://localhost:8080
 ```
 
 ### Networking Notes
@@ -197,6 +197,12 @@ docker run \
   --env-file .env \
   --network host \
   bambu-moonraker-shim
+```
+
+Access Mainsail at:
+
+```
+http://localhost
 ```
 
 ## Fan Control
