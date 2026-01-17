@@ -230,9 +230,9 @@ class BambuClient:
 
         rounded = int(round(target_value))
         if heater == "bed":
-            cmd = "M190" if wait else "M140"
+            cmd = "M190"
         else:
-            cmd = "M109" if wait else "M104"
+            cmd = "M109" if wait or rounded == 0 else "M104"
 
         gcode = f"{cmd} S{rounded} \n"
         await self.send_gcode_line(gcode)

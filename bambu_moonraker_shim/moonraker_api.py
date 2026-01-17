@@ -216,6 +216,7 @@ def _is_macro_command(command: str) -> bool:
         "START_PRINT",
         "PRINT_END",
         "END_PRINT",
+        "HEATERS_OFF",
         "PAUSE",
         "RESUME",
         "CANCEL_PRINT",
@@ -311,6 +312,17 @@ async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, An
         await bambu_client.send_gcode_line("M106 P2 S0 \n")
         await bambu_client.send_gcode_line("M84 \n")
         return {"result": "ok", "action": "print_end"}
+
+    if macro_name == "HEATERS_OFF":
+        result = await bambu_client.set_nozzle_temp(0, wait=True)
+        if "error" in result:
+            return result
+        await state_manager.update_state({"extruder": {"target": 0}})
+        result = await bambu_client.set_bed_temp(0, wait=True)
+        if "error" in result:
+            return result
+        await state_manager.update_state({"heater_bed": {"target": 0}})
+        return {"result": "ok", "action": "heaters_off"}
 
     if macro_name == "PAUSE":
         await bambu_client.pause_print()
