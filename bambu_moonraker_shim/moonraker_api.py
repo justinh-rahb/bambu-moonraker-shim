@@ -205,6 +205,8 @@ def _is_macro_command(command: str) -> bool:
         return False
     first_word = command.split()[0].upper()
     non_macro_commands = {
+        "SAVE_GCODE_STATE",
+        "RESTORE_GCODE_STATE",
         "SET_PIN",
         "SET_FAN_SPEED",
         "SET_HEATER_TEMPERATURE",
