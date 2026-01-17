@@ -4,7 +4,7 @@ import ssl
 import time
 from typing import Optional, Dict, Any
 import aiomqtt
-from bambu_moonraker_shim.config import Config
+from bambu_moonraker_shim.config import Config, parse_bool
 from bambu_moonraker_shim.state_manager import state_manager
 
 class BambuClient:
@@ -229,10 +229,12 @@ class BambuClient:
             return {"error": "Printer not connected"}
 
         rounded = int(round(target_value))
+        force_wait = parse_bool(Config.BAMBU_FORCE_HEATER_WAIT)
+        use_wait = wait or force_wait
         if heater == "bed":
-            cmd = "M190"
+            cmd = "M190" if use_wait else "M140"
         else:
-            cmd = "M109"
+            cmd = "M109" if use_wait else "M104"
 
         gcode = f"{cmd} S{rounded} \n"
         await self.send_gcode_line(gcode)
