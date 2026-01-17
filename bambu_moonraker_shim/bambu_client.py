@@ -127,12 +127,17 @@ class BambuClient:
             if "subtask_name" in data:
                 updates["print_stats"]["filename"] = data["subtask_name"]
 
+            updates["virtual_sdcard"] = {
+                "is_active": klipper_state == "printing"
+            }
+
         # Progress
         if "mc_percent" in data:
             progress = float(data.get("mc_percent", 0)) / 100.0
-            updates["virtual_sdcard"] = {"progress": progress}
+            updates.setdefault("virtual_sdcard", {})
+            updates["virtual_sdcard"]["progress"] = progress
             if klipper_state:
-                 updates["virtual_sdcard"]["is_active"] = klipper_state == "printing"
+                updates["virtual_sdcard"]["is_active"] = klipper_state == "printing"
 
             updates["display_status"] = {"progress": progress}
             
@@ -192,6 +197,63 @@ class BambuClient:
             }
         }
         await self.publish_command(cmd)
+
+    async def start_print(
+        self,
+        filename: str,
+        plate_number: int = 1,
+        use_ams: bool = False,
+        bed_leveling: bool = True,
+        flow_calibration: bool = False,
+        timelapse: bool = False,
+    ) -> Dict[str, Any]:
+        """Start a print for a file already uploaded to the printer."""
+        if not self._mqtt_client or not self.connected:
+            return {"error": "Printer not connected"}
+
+        if not filename:
+            return {"error": "Filename required"}
+
+        lower_name = filename.lower()
+        is_3mf = lower_name.endswith(".3mf")
+        is_gcode = lower_name.endswith(".gcode")
+
+        if not (is_3mf or is_gcode):
+            return {"error": "File must be .3mf or .gcode"}
+
+        plate = max(int(plate_number), 1)
+        param = f"Metadata/plate_{plate}.gcode" if is_3mf else ""
+
+        cmd = {
+            "print": {
+                "sequence_id": "0",
+                "command": "project_file",
+                "param": param,
+                "project_id": "0",
+                "profile_id": "0",
+                "task_id": "0",
+                "subtask_id": "0",
+                "subtask_name": filename,
+                "file": filename,
+                "url": f"ftp:///{filename}",
+                "md5": "",
+                "timelapse": timelapse,
+                "bed_type": "auto",
+                "bed_levelling": bed_leveling,
+                "flow_cali": flow_calibration,
+                "vibration_cali": False,
+                "layer_inspect": False,
+                "ams_mapping": "",
+                "use_ams": use_ams,
+            }
+        }
+
+        try:
+            await self.publish_command(cmd)
+        except Exception as exc:
+            return {"error": str(exc)}
+
+        return {"result": "ok"}
 
     async def send_temperature_command(
         self, heater: str, target_temp: float, wait: bool = False

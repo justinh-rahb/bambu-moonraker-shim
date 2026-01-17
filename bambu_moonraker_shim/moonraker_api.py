@@ -256,6 +256,12 @@ def _parse_macro_param(
     return None, None
 
 
+def _normalize_filename(filename: str) -> str:
+    if filename.startswith("gcodes/"):
+        return filename[7:]
+    return filename
+
+
 async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, Any]:
     if not bambu_client.connected:
         return {"error": "Printer not connected"}
@@ -541,10 +547,16 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
 
 
 @router.post("/server/files/upload")
-async def file_upload(file: UploadFile = File(...), path: str = None):
+async def file_upload(
+    file: UploadFile = File(...),
+    path: str = None,
+    print: bool = False,
+    plate: int = 1,
+):
     try:
         # Save uploaded file to a temp location first
-        temp_fd, temp_path = tempfile.mkstemp(suffix=".gcode")
+        suffix = os.path.splitext(file.filename or "")[1] or ".gcode"
+        temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
         try:
             # Write the uploaded file to temp
             with os.fdopen(temp_fd, 'wb') as tmp:
@@ -560,14 +572,26 @@ async def file_upload(file: UploadFile = File(...), path: str = None):
             
             # Get file size
             file_size = len(content)
-            
+
+            print_started = False
+            if print:
+                result = await bambu_client.start_print(
+                    filename=file.filename,
+                    plate_number=plate,
+                    bed_leveling=True,
+                )
+                if "error" not in result:
+                    print_started = True
+                else:
+                    print(f"Auto-start failed: {result['error']}")
+
             return success_response({
                 "item": {
                     "path": f"gcodes/{file.filename}",
                     "size": file_size,
                     "modified": time.time()
                 },
-                "print_started": False
+                "print_started": print_started
             })
         finally:
             # Clean up temp file
@@ -662,9 +686,18 @@ async def print_start(request: Request):
     try:
         body = await request.json()
         filename = body.get("filename")
-        # TODO: Implement start print logic in BambuClient
+        if not filename:
+            return error_response(400, "Filename required")
+        filename = _normalize_filename(filename)
+        plate = body.get("plate", 1)
         print(f"Requested start print: {filename}")
-        # await bambu_client.start_print(filename)
+        result = await bambu_client.start_print(
+            filename=filename,
+            plate_number=plate,
+            bed_leveling=True,
+        )
+        if "error" in result:
+            return error_response(500, result["error"])
         return success_response("ok")
     except Exception as e:
         return error_response(400, str(e))
@@ -1206,6 +1239,24 @@ async def handle_jsonrpc(
             print(f"Executing G-code: {line}")
             await bambu_client.send_gcode_line(line)
         response["result"] = "ok"
+
+    elif method == "printer.print.start":
+        params = request.get("params", {})
+        filename = params.get("filename")
+        if not filename:
+            response["error"] = {"code": 400, "message": "Filename required"}
+            return response
+        filename = _normalize_filename(filename)
+        plate = params.get("plate", 1)
+        result = await bambu_client.start_print(
+            filename=filename,
+            plate_number=plate,
+            bed_leveling=True,
+        )
+        if "error" in result:
+            response["error"] = {"code": 500, "message": result["error"]}
+        else:
+            response["result"] = "ok"
 
     elif method == "server.files.roots":
         response["result"] = {
