@@ -4,7 +4,7 @@ import ssl
 import time
 from typing import Optional, Dict, Any
 import aiomqtt
-from bambu_moonraker_shim.config import Config
+from bambu_moonraker_shim.config import Config, parse_bool
 from bambu_moonraker_shim.state_manager import state_manager
 
 class BambuClient:
@@ -98,10 +98,10 @@ class BambuClient:
 
         # Fan
         if "cooling_fan_speed" in data:
-            # Bambu sends 0-15 (sometimes strings), map to 0.0-1.0
+            # Bambu sends 0-15 (sometimes strings), but if on/off only, expose as 100%.
             try:
                 speed = float(data.get("cooling_fan_speed", 0))
-                updates["fan"] = {"speed": speed / 15.0 if speed > 0 else 0.0}
+                updates["fan"] = {"speed": 1.0 if speed > 0 else 0.0}
             except:
                 pass
 
@@ -192,6 +192,59 @@ class BambuClient:
             }
         }
         await self.publish_command(cmd)
+
+    async def send_temperature_command(
+        self, heater: str, target_temp: float, wait: bool = False
+    ) -> Dict[str, Any]:
+        """Sends a temperature command via MQTT gcode_line."""
+        temp_limits = {
+            "bed": {"min": 0, "max": 120, "safe_max": 100},
+            "extruder": {"min": 0, "max": 300, "safe_max": 280},
+        }
+
+        if heater not in temp_limits:
+            return {"error": f"Unknown heater: {heater}"}
+
+        try:
+            target_value = float(target_temp)
+        except (TypeError, ValueError):
+            return {"error": f"Invalid temperature value: {target_temp}"}
+
+        limits = temp_limits[heater]
+        if target_value < limits["min"] or target_value > limits["max"]:
+            return {
+                "error": (
+                    f"Temperature {target_value}°C out of range "
+                    f"({limits['min']}-{limits['max']}°C)"
+                )
+            }
+
+        if target_value > limits["safe_max"]:
+            print(
+                f"Warning: {heater} temperature {target_value}°C exceeds safe max "
+                f"{limits['safe_max']}°C."
+            )
+
+        if not self._mqtt_client or not self.connected:
+            return {"error": "Printer not connected"}
+
+        rounded = int(round(target_value))
+        force_wait = parse_bool(Config.BAMBU_FORCE_HEATER_WAIT)
+        use_wait = wait or force_wait
+        if heater == "bed":
+            cmd = "M190" if use_wait else "M140"
+        else:
+            cmd = "M109" if use_wait else "M104"
+
+        gcode = f"{cmd} S{rounded} \n"
+        await self.send_gcode_line(gcode)
+        return {"result": "ok"}
+
+    async def set_nozzle_temp(self, temp_c: float, wait: bool = False) -> Dict[str, Any]:
+        return await self.send_temperature_command("extruder", temp_c, wait=wait)
+
+    async def set_bed_temp(self, temp_c: float, wait: bool = False) -> Dict[str, Any]:
+        return await self.send_temperature_command("bed", temp_c, wait=wait)
 
     async def set_light(self, on: bool):
         """Turns the chamber light on or off using MQTT."""

@@ -23,6 +23,7 @@ class Config:
     BAMBU_FTPS_USER = os.getenv("BAMBU_FTPS_USER", "bblp")
     BAMBU_FTPS_PASS = os.getenv("BAMBU_FTPS_PASS", BAMBU_ACCESS_CODE)
     BAMBU_FTPS_UPLOADS_DIR = os.getenv("BAMBU_FTPS_UPLOADS_DIR", "/")
+    BAMBU_FORCE_HEATER_WAIT = os.getenv("BAMBU_FORCE_HEATER_WAIT", "true")
 
     # Paths
     GCODES_DIR = os.getenv("GCODES_DIR", "gcodes")
@@ -30,3 +31,7 @@ class Config:
 # Ensure gcodes directory exists
 if not os.path.exists(Config.GCODES_DIR):
     os.makedirs(Config.GCODES_DIR)
+
+
+def parse_bool(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}

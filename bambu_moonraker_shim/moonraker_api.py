@@ -200,6 +200,154 @@ def success_response(data: Any) -> Dict[str, Any]:
     return {"result": data}
 
 
+def _is_macro_command(command: str) -> bool:
+    if not command:
+        return False
+    first_word = command.split()[0].upper()
+    non_macro_commands = {
+        "SET_PIN",
+        "SET_FAN_SPEED",
+        "SET_HEATER_TEMPERATURE",
+    }
+    if first_word in non_macro_commands:
+        return False
+    known_macros = {
+        "PRINT_START",
+        "START_PRINT",
+        "PRINT_END",
+        "END_PRINT",
+        "HEATERS_OFF",
+        "TURN_OFF_HEATERS",
+        "PAUSE",
+        "RESUME",
+        "CANCEL_PRINT",
+        "LOAD_FILAMENT",
+        "UNLOAD_FILAMENT",
+        "BED_MESH_CALIBRATE",
+    }
+    if first_word in known_macros:
+        return True
+    if not first_word.startswith(("M", "G", "T")) and first_word[0].isalpha():
+        return True
+    return False
+
+
+def _parse_macro(command: str) -> tuple[str, Dict[str, str]]:
+    parts = command.split()
+    macro_name = parts[0].upper()
+    params: Dict[str, str] = {}
+    for part in parts[1:]:
+        if "=" in part:
+            key, value = part.split("=", 1)
+            params[key.upper()] = value
+    return macro_name, params
+
+
+def _parse_macro_param(
+    params: Dict[str, str], keys: List[str]
+) -> tuple[Optional[float], Optional[str]]:
+    for key in keys:
+        if key in params:
+            value = params[key]
+            try:
+                return float(value), None
+            except (TypeError, ValueError):
+                return None, f"Invalid value for {key}: {value}"
+    return None, None
+
+
+async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, Any]:
+    if not bambu_client.connected:
+        return {"error": "Printer not connected"}
+
+    if macro_name in ("PRINT_START", "START_PRINT"):
+        bed_temp, error = _parse_macro_param(params, ["BED_TEMP", "BED"])
+        if error:
+            return {"error": error}
+        hotend_temp, error = _parse_macro_param(
+            params, ["HOTEND", "EXTRUDER", "EXTRUDER_TEMP"]
+        )
+        if error:
+            return {"error": error}
+        chamber_temp, error = _parse_macro_param(params, ["CHAMBER"])
+        if error:
+            return {"error": error}
+        if chamber_temp is not None:
+            print("Warning: CHAMBER temperature requested but not supported.")
+
+        await bambu_client.send_gcode_line("G28 \n")
+
+        if bed_temp is not None:
+            result = await bambu_client.set_bed_temp(bed_temp, wait=False)
+            if "error" in result:
+                return result
+            await state_manager.update_state({"heater_bed": {"target": bed_temp}})
+        if hotend_temp is not None:
+            result = await bambu_client.set_nozzle_temp(hotend_temp, wait=False)
+            if "error" in result:
+                return result
+            await state_manager.update_state({"extruder": {"target": hotend_temp}})
+
+        if bed_temp and bed_temp > 0:
+            result = await bambu_client.set_bed_temp(bed_temp, wait=True)
+            if "error" in result:
+                return result
+        if hotend_temp and hotend_temp > 0:
+            result = await bambu_client.set_nozzle_temp(hotend_temp, wait=True)
+            if "error" in result:
+                return result
+
+        return {"result": "ok", "action": "print_start"}
+
+    if macro_name in ("PRINT_END", "END_PRINT"):
+        result = await bambu_client.set_nozzle_temp(0, wait=False)
+        if "error" in result:
+            return result
+        await state_manager.update_state({"extruder": {"target": 0}})
+        result = await bambu_client.set_bed_temp(0, wait=False)
+        if "error" in result:
+            return result
+        await state_manager.update_state({"heater_bed": {"target": 0}})
+
+        await bambu_client.send_gcode_line("M106 P1 S0 \n")
+        await bambu_client.send_gcode_line("M106 P2 S0 \n")
+        await bambu_client.send_gcode_line("M84 \n")
+        return {"result": "ok", "action": "print_end"}
+
+    if macro_name in ("HEATERS_OFF", "TURN_OFF_HEATERS"):
+        result = await bambu_client.set_nozzle_temp(0, wait=True)
+        if "error" in result:
+            return result
+        await state_manager.update_state({"extruder": {"target": 0}})
+        result = await bambu_client.set_bed_temp(0, wait=True)
+        if "error" in result:
+            return result
+        await state_manager.update_state({"heater_bed": {"target": 0}})
+        return {"result": "ok", "action": "heaters_off"}
+
+    if macro_name == "PAUSE":
+        await bambu_client.pause_print()
+        return {"result": "ok", "action": "pause"}
+
+    if macro_name == "RESUME":
+        await bambu_client.resume_print()
+        return {"result": "ok", "action": "resume"}
+
+    if macro_name == "CANCEL_PRINT":
+        await bambu_client.cancel_print()
+        return {"result": "ok", "action": "cancel"}
+
+    if macro_name == "BED_MESH_CALIBRATE":
+        print("BED_MESH_CALIBRATE requested; Bambu handles leveling automatically.")
+        return {"result": "ok", "action": "bed_mesh_calibrate"}
+
+    if macro_name in ("LOAD_FILAMENT", "UNLOAD_FILAMENT"):
+        print(f"{macro_name} requested; no Bambu macro translation available.")
+        return {"result": "ok", "action": macro_name.lower()}
+
+    return {"error": f"Unsupported macro: {macro_name}"}
+
+
 def error_response(code: int, message: str) -> JSONResponse:
     return JSONResponse(
         status_code=code, content={"error": {"code": code, "message": message}}
@@ -908,6 +1056,14 @@ async def handle_jsonrpc(
             line = line.strip()
             if not line:
                 continue
+
+            if _is_macro_command(line):
+                macro_name, params = _parse_macro(line)
+                result = await _handle_macro(macro_name, params)
+                if "error" in result:
+                    response["error"] = {"code": 400, "message": result["error"]}
+                    return response
+                continue
             
             # Intercept SET_PIN command for LED control
             # Format: SET_PIN PIN=caselight VALUE=1.00
@@ -965,6 +1121,86 @@ async def handle_jsonrpc(
                     continue # Don't send this to printer as raw gcode
                 except Exception as e:
                     print(f"Error parsing SET_FAN_SPEED: {e}")
+
+            # Intercept heater commands (M104/M109/M140/M190)
+            if line.upper().startswith(("M104", "M109", "M140", "M190")):
+                try:
+                    parts = line.upper().split()
+                    cmd = parts[0]
+                    temp = None
+                    for part in parts:
+                        if part.startswith("S"):
+                            temp = float(part[1:])
+                            break
+
+                    if temp is None:
+                        response["error"] = {
+                            "code": 400,
+                            "message": f"Missing S parameter in heater command: {line}",
+                        }
+                        return response
+
+                    if cmd in ("M104", "M109"):
+                        result = await bambu_client.set_nozzle_temp(temp, wait=(cmd == "M109"))
+                    elif cmd in ("M140", "M190"):
+                        result = await bambu_client.set_bed_temp(temp, wait=(cmd == "M190"))
+                    else:
+                        result = {"error": f"Unsupported heater command: {cmd}"}
+
+                    if "error" in result:
+                        response["error"] = {"code": 400, "message": result["error"]}
+                        return response
+                    if cmd in ("M104", "M109"):
+                        await state_manager.update_state({"extruder": {"target": temp}})
+                    elif cmd in ("M140", "M190"):
+                        await state_manager.update_state({"heater_bed": {"target": temp}})
+
+                    continue
+                except Exception as e:
+                    print(f"Heater parse error: {e}")
+
+            # Intercept SET_HEATER_TEMPERATURE for Moonraker compatibility
+            # Format: SET_HEATER_TEMPERATURE HEATER=<name> TARGET=<value>
+            if line.upper().startswith("SET_HEATER_TEMPERATURE"):
+                try:
+                    parts = line.split()
+                    heater_name = None
+                    target = None
+                    wait = False
+                    for part in parts:
+                        upper = part.upper()
+                        if upper.startswith("HEATER="):
+                            heater_name = part.split("=", 1)[1]
+                        elif upper.startswith("TARGET="):
+                            target = float(part.split("=", 1)[1])
+                        elif upper.startswith("WAIT="):
+                            wait_value = part.split("=", 1)[1].strip().lower()
+                            wait = wait_value in {"1", "true", "yes", "on"}
+
+                    if heater_name is None or target is None:
+                        response["error"] = {
+                            "code": 400,
+                            "message": f"Invalid SET_HEATER_TEMPERATURE command: {line}",
+                        }
+                        return response
+
+                    if heater_name == "extruder":
+                        result = await bambu_client.set_nozzle_temp(target, wait=wait)
+                    elif heater_name in ("heater_bed", "bed"):
+                        result = await bambu_client.set_bed_temp(target, wait=wait)
+                    else:
+                        result = {"error": f"Unknown heater: {heater_name}"}
+
+                    if "error" in result:
+                        response["error"] = {"code": 400, "message": result["error"]}
+                        return response
+                    if heater_name == "extruder":
+                        await state_manager.update_state({"extruder": {"target": target}})
+                    elif heater_name in ("heater_bed", "bed"):
+                        await state_manager.update_state({"heater_bed": {"target": target}})
+                    continue
+                except Exception as e:
+                    print(f"SET_HEATER_TEMPERATURE parse error: {e}")
 
             # Basic logging for now
             print(f"Executing G-code: {line}")
