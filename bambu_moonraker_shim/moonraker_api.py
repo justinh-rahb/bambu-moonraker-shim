@@ -217,6 +217,7 @@ def _is_macro_command(command: str) -> bool:
         "PRINT_END",
         "END_PRINT",
         "HEATERS_OFF",
+        "TURN_OFF_HEATERS",
         "PAUSE",
         "RESUME",
         "CANCEL_PRINT",
@@ -313,7 +314,7 @@ async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, An
         await bambu_client.send_gcode_line("M84 \n")
         return {"result": "ok", "action": "print_end"}
 
-    if macro_name == "HEATERS_OFF":
+    if macro_name in ("HEATERS_OFF", "TURN_OFF_HEATERS"):
         result = await bambu_client.set_nozzle_temp(0, wait=True)
         if "error" in result:
             return result
