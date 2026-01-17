@@ -563,8 +563,12 @@ async def file_upload(
                 content = await file.read()
                 tmp.write(content)
             
-            # Upload to printer via FTPS
-            ftps_client.upload_file(temp_path, file.filename)
+            # Upload to printer via FTPS (offload blocking FTP call)
+            await asyncio.to_thread(
+                ftps_client.upload_file,
+                temp_path,
+                file.filename,
+            )
             
             # Invalidate file cache so next list is fresh
             sqlite_manager = get_sqlite_manager()
