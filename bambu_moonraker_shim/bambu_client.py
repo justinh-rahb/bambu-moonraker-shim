@@ -214,7 +214,10 @@ class BambuClient:
         if not filename:
             return {"error": "Filename required"}
 
-        lower_name = filename.lower()
+        normalized = filename.lstrip("/")
+        if not normalized:
+            return {"error": "Filename required"}
+        lower_name = normalized.lower()
         is_3mf = lower_name.endswith(".3mf")
         is_gcode = lower_name.endswith(".gcode")
 
@@ -233,9 +236,9 @@ class BambuClient:
                 "profile_id": "0",
                 "task_id": "0",
                 "subtask_id": "0",
-                "subtask_name": filename,
-                "file": filename,
-                "url": f"ftp:///{filename}",
+                "subtask_name": normalized,
+                "file": "",
+                "url": f"ftp:///{normalized}",
                 "md5": "",
                 "timelapse": timelapse,
                 "bed_type": "auto",
