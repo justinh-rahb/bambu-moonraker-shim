@@ -193,17 +193,56 @@ class BambuClient:
         }
         await self.publish_command(cmd)
 
-    async def set_nozzle_temp(self, temp_c: float, wait: bool = False):
-        t = int(round(float(temp_c)))
-        cmd = Config.BAMBU_NOZZLE_SET_WAIT_CMD if wait else Config.BAMBU_NOZZLE_SET_CMD
-        gcode = f"{cmd} S{t}\n"
-        await self.send_gcode_line(gcode)
+    async def send_temperature_command(
+        self, heater: str, target_temp: float, wait: bool = False
+    ) -> Dict[str, Any]:
+        """Sends a temperature command via MQTT gcode_line."""
+        temp_limits = {
+            "bed": {"min": 0, "max": 120, "safe_max": 100},
+            "extruder": {"min": 0, "max": 300, "safe_max": 280},
+        }
 
-    async def set_bed_temp(self, temp_c: float, wait: bool = False):
-        t = int(round(float(temp_c)))
-        cmd = Config.BAMBU_BED_SET_WAIT_CMD if wait else Config.BAMBU_BED_SET_CMD
-        gcode = f"{cmd} S{t}\n"
+        if heater not in temp_limits:
+            return {"error": f"Unknown heater: {heater}"}
+
+        try:
+            target_value = float(target_temp)
+        except (TypeError, ValueError):
+            return {"error": f"Invalid temperature value: {target_temp}"}
+
+        limits = temp_limits[heater]
+        if target_value < limits["min"] or target_value > limits["max"]:
+            return {
+                "error": (
+                    f"Temperature {target_value}°C out of range "
+                    f"({limits['min']}-{limits['max']}°C)"
+                )
+            }
+
+        if target_value > limits["safe_max"]:
+            print(
+                f"Warning: {heater} temperature {target_value}°C exceeds safe max "
+                f"{limits['safe_max']}°C."
+            )
+
+        if not self._mqtt_client or not self.connected:
+            return {"error": "Printer not connected"}
+
+        rounded = int(round(target_value))
+        if heater == "bed":
+            cmd = "M190" if wait else "M140"
+        else:
+            cmd = "M109" if wait else "M104"
+
+        gcode = f"{cmd} S{rounded} \n"
         await self.send_gcode_line(gcode)
+        return {"result": "ok"}
+
+    async def set_nozzle_temp(self, temp_c: float, wait: bool = False) -> Dict[str, Any]:
+        return await self.send_temperature_command("extruder", temp_c, wait=wait)
+
+    async def set_bed_temp(self, temp_c: float, wait: bool = False) -> Dict[str, Any]:
+        return await self.send_temperature_command("bed", temp_c, wait=wait)
 
     async def set_light(self, on: bool):
         """Turns the chamber light on or off using MQTT."""

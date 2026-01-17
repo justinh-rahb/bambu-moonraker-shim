@@ -978,13 +978,25 @@ async def handle_jsonrpc(
                             break
 
                     if temp is None:
-                        continue
+                        response["error"] = {
+                            "code": 400,
+                            "message": f"Missing S parameter in heater command: {line}",
+                        }
+                        return response
 
                     if cmd in ("M104", "M109"):
-                        await bambu_client.set_nozzle_temp(temp, wait=(cmd == "M109"))
+                        result = await bambu_client.set_nozzle_temp(temp, wait=(cmd == "M109"))
+                    elif cmd in ("M140", "M190"):
+                        result = await bambu_client.set_bed_temp(temp, wait=(cmd == "M190"))
+                    else:
+                        result = {"error": f"Unsupported heater command: {cmd}"}
+
+                    if "error" in result:
+                        response["error"] = {"code": 400, "message": result["error"]}
+                        return response
+                    if cmd in ("M104", "M109"):
                         await state_manager.update_state({"extruder": {"target": temp}})
                     elif cmd in ("M140", "M190"):
-                        await bambu_client.set_bed_temp(temp, wait=(cmd == "M190"))
                         await state_manager.update_state({"heater_bed": {"target": temp}})
 
                     continue
@@ -1010,13 +1022,25 @@ async def handle_jsonrpc(
                             wait = wait_value in {"1", "true", "yes", "on"}
 
                     if heater_name is None or target is None:
-                        continue
+                        response["error"] = {
+                            "code": 400,
+                            "message": f"Invalid SET_HEATER_TEMPERATURE command: {line}",
+                        }
+                        return response
 
                     if heater_name == "extruder":
-                        await bambu_client.set_nozzle_temp(target, wait=wait)
+                        result = await bambu_client.set_nozzle_temp(target, wait=wait)
+                    elif heater_name in ("heater_bed", "bed"):
+                        result = await bambu_client.set_bed_temp(target, wait=wait)
+                    else:
+                        result = {"error": f"Unknown heater: {heater_name}"}
+
+                    if "error" in result:
+                        response["error"] = {"code": 400, "message": result["error"]}
+                        return response
+                    if heater_name == "extruder":
                         await state_manager.update_state({"extruder": {"target": target}})
                     elif heater_name in ("heater_bed", "bed"):
-                        await bambu_client.set_bed_temp(target, wait=wait)
                         await state_manager.update_state({"heater_bed": {"target": target}})
                     continue
                 except Exception as e:
