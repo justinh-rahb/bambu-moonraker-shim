@@ -6,7 +6,7 @@ import uuid
 import os
 import tempfile
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, UploadFile, File
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Form, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 from bambu_moonraker_shim.state_manager import state_manager
 from bambu_moonraker_shim.bambu_client import bambu_client
@@ -541,8 +541,37 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
 
 
 @router.post("/server/files/upload")
-async def file_upload(file: UploadFile = File(...), path: str = None):
+async def file_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    root: Optional[str] = Form(None),
+    path: Optional[str] = Form(None),
+    print: Optional[str] = Form(None),
+    filename: Optional[str] = Form(None),
+):
     try:
+        query_params = request.query_params
+        root_value = (root or query_params.get("root") or "gcodes").strip()
+        root_value = root_value.strip("/").lower()
+        if root_value.startswith("gcodes/"):
+            root_suffix = root_value[len("gcodes/"):].strip("/")
+            path = f"{root_suffix}/{path}" if path else root_suffix
+            root_value = "gcodes"
+        if root_value != "gcodes":
+            return error_response(400, f"Unsupported root: {root_value}")
+
+        safe_name = filename or query_params.get("filename") or file.filename
+        path_value = path or query_params.get("path")
+        if not safe_name and path_value:
+            safe_name = os.path.basename(path_value)
+            path_value = os.path.dirname(path_value)
+        if not safe_name:
+            safe_name = "upload.gcode"
+
+        remote_rel = safe_name
+        if path_value:
+            remote_rel = f"{path_value.strip('/')}/{safe_name}"
+
         # Save uploaded file to a temp location first
         temp_fd, temp_path = tempfile.mkstemp(suffix=".gcode")
         try:
@@ -552,22 +581,28 @@ async def file_upload(file: UploadFile = File(...), path: str = None):
                 tmp.write(content)
             
             # Upload to printer via FTPS
-            ftps_client.upload_file(temp_path, file.filename)
+            ftps_client.upload_file(temp_path, remote_rel)
             
             # Invalidate file cache so next list is fresh
             sqlite_manager = get_sqlite_manager()
             sqlite_manager.clear_file_cache()
+
+            print_value = print or query_params.get("print")
+            want_print = (print_value or "").lower() == "true"
+            print_started = False
+            if want_print:
+                print_started = await bambu_client.start_print(remote_rel)
             
             # Get file size
             file_size = len(content)
             
             return success_response({
                 "item": {
-                    "path": f"gcodes/{file.filename}",
+                    "path": f"gcodes/{remote_rel}",
                     "size": file_size,
                     "modified": time.time()
                 },
-                "print_started": False
+                "print_started": print_started
             })
         finally:
             # Clean up temp file
@@ -658,14 +693,17 @@ async def database_list():
 
 
 @router.post("/printer/print/start")
-async def print_start(request: Request):
+async def print_start(request: Request, filename: Optional[str] = Query(None)):
     try:
-        body = await request.json()
-        filename = body.get("filename")
-        # TODO: Implement start print logic in BambuClient
-        print(f"Requested start print: {filename}")
-        # await bambu_client.start_print(filename)
-        return success_response("ok")
+        if filename is None:
+            body = await request.json()
+            filename = body.get("filename")
+
+        if not filename:
+            return error_response(400, "filename is required")
+
+        started = await bambu_client.start_print(filename)
+        return success_response({"started": started})
     except Exception as e:
         return error_response(400, str(e))
 
@@ -1206,6 +1244,14 @@ async def handle_jsonrpc(
             print(f"Executing G-code: {line}")
             await bambu_client.send_gcode_line(line)
         response["result"] = "ok"
+
+    elif method == "printer.print.start":
+        filename = request.get("params", {}).get("filename")
+        if not filename:
+            response["error"] = {"code": 400, "message": "filename is required"}
+            return response
+        started = await bambu_client.start_print(filename)
+        response["result"] = {"started": started}
 
     elif method == "server.files.roots":
         response["result"] = {
