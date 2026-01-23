@@ -56,16 +56,9 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
 
 ### Control (Working)
 
-* **Print control**:
-  * Pause / Resume / Cancel prints
 * **Temperature control**:
   * Set bed temperature (via M140/M190 or Moonraker commands)
   * Set extruder temperature (via M104/M109 or Moonraker commands)
-* **Klipper macro support**:
-  * `PRINT_START` / `START_PRINT` (with bed/hotend/chamber parameters)
-  * `PRINT_END` / `END_PRINT`
-  * `PAUSE` / `RESUME` / `CANCEL_PRINT`
-  * `BED_MESH_CALIBRATE` (accepted, auto-leveling is automatic)
 * Manual G-code command sending (limited)
 * XYZ movement
 * Homing
@@ -83,6 +76,7 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
 
 ## What Does NOT Work (Yet)
 
+* ❌ Pause / Resume / Cancel prints
 * ❌ Start prints from uploaded files (basic implementation exists)
 * ❌ Reliably turning off heaters (firmware limitation - see Known Issues)
 * ❌ Full interactive G-code console
