@@ -36,7 +36,7 @@ CONFIG_FILES = {
             "max_temp: 120",
             "",
             "[virtual_sdcard]",
-            "path: /tmp/gcodes",
+            "path: /home/pi/printer_data/gcodes",
             "",
             "[display_status]",
             "",
@@ -87,7 +87,7 @@ def _config_directory_listing():
                 "modified": now,
                 "size": len(content.encode("utf-8")),
                 "permissions": "rw",
-                "path": _join_moonraker_path("config", name),
+                "path": name,
             }
         )
     return {
@@ -101,7 +101,7 @@ def _config_directory_listing():
         "root_info": {
             "name": "config",
             "permissions": "rw",
-            "path": "config",
+            "path": "/home/pi/printer_data/config",
         },
     }
 
@@ -129,7 +129,7 @@ def _mock_directory_listing(path: str) -> Dict[str, Any]:
                 "modified": mock_file["modified"],
                 "size": mock_file["size"],
                 "permissions": "rw",
-                "path": _join_moonraker_path(path, mock_file["name"]),
+                "path": mock_file["name"],
             }
         )
 
@@ -144,7 +144,7 @@ def _mock_directory_listing(path: str) -> Dict[str, Any]:
         "root_info": {
             "name": "gcodes",
             "permissions": "rw",
-            "path": "gcodes",
+            "path": "/home/pi/printer_data/gcodes",
         },
     }
 
@@ -167,24 +167,44 @@ def _build_file_list(root: str) -> List[Dict[str, Any]]:
             }
         ]
 
-    # List files from printer via FTPS
-    remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
+    # Use SQLite caching robustly
+    sqlite_manager = get_sqlite_manager()
+    
+    # Try fresh cache - matches all "gcodes/%" (recursive)
+    cached_files = sqlite_manager.get_cached_files(directory_path="gcodes", max_age=300, allow_stale=False)
+    
+    if cached_files is None:
+        try:
+             # FTPS Fetch (Root only for now, deep recursion is slow on Bambu)
+             remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
+             
+             files_to_update = []
+             for f in remote_files:
+                 f_with_path = f.copy()
+                 f_with_path["path"] = _join_moonraker_path("gcodes", f["name"])
+                 files_to_update.append(f_with_path)
+            
+             sqlite_manager.cache_files(files_to_update)
+             cached_files = files_to_update
+             
+        except Exception as e:
+             print(f"Error listing files in _build_file_list: {e}")
+             # Fallback
+             cached_files = sqlite_manager.get_cached_files(directory_path="gcodes", allow_stale=True) or []
 
-    # Filter to only show gcode files (not directories)
-    # Mainsail expects a flat list with "path" starting with "gcodes/"
+    # Filter for return (only files, correct extension)
     files = []
-    for f in remote_files:
-        if not f["is_dir"]:
-            # Filter by extension if desired
-            name = f["name"]
+    for f in (cached_files or []):
+         # get_cached_files returns dicts with 'is_dir'. 
+         if not f.get('is_dir'):
+            name = f['name']
             if name.endswith((".gcode", ".gcode.3mf", ".3mf")):
                 files.append({
-                    "path": _join_moonraker_path("gcodes", name),
+                    "path": name,
                     "size": f["size"],
                     "modified": f["modified"],
                     "permissions": "rw",
                 })
-
     return files
 
 
@@ -393,9 +413,16 @@ async def server_info():
                 "database",
                 "file_manager",
                 "webcams",
+                "history",
+                "job_queue",
+                "virtual_sdcard",
             ],
+            "failed_components": [],
             "version": "v0.0.1-bambu-shim",
-            "api_version": [1, 0, 0],
+            "api_version": [1, 2, 1],
+            "python_path": "/usr/bin/python3",
+            "config_path": "/home/pi/printer_data/config",
+            "log_path": "/home/pi/printer_data/logs",
         }
     )
 
@@ -491,22 +518,35 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
         ftps_path = f"{Config.BAMBU_FTPS_UPLOADS_DIR}/{subdir}".replace("//", "/")
 
     # NOTE: Same cache logic as WebSocket endpoint
-    cached_files = None
-    if path == "gcodes":
-            cached_files = sqlite_manager.get_cached_files(max_age=300)
+    # Try validation: check fresh cache first
+    cached_files = sqlite_manager.get_cached_files(directory_path=path, max_age=300, allow_stale=False)
     
     if cached_files is None:
-        # Cache miss - fetch from FTPS
+        # Cache miss or expired - fetch from FTPS
         print(f"Fetching files from FTPS for path: {ftps_path} (requested: {path})")
         try:
             remote_files = ftps_client.list_files(ftps_path)
-            # Only cache the root listing for now
-            if path == "gcodes":
-                sqlite_manager.cache_files(remote_files)
+            
+            # Inject full path for caching
+            files_to_cache = []
+            for f in remote_files:
+                f_with_path = f.copy()
+                f_with_path["path"] = _join_moonraker_path(path, f["name"])
+                files_to_cache.append(f_with_path)
+            
+            # Cache the listing (works for subdirectories now too)
+            sqlite_manager.cache_files(files_to_cache)
             cached_files = remote_files
+            
         except Exception as e:
             print(f"Error fetching files from FTPS: {e}")
-            cached_files = []
+            # FTPS failed - try to fall back to stale cache
+            print("Attempting to fall back to stale cache...")
+            cached_files = sqlite_manager.get_cached_files(directory_path=path, allow_stale=True)
+            
+            if cached_files is None:
+                print("No stale cache available. Returning empty list.")
+                cached_files = []
     
     # Transform to Moonraker format
     dirs = []
@@ -519,7 +559,7 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
                 "modified": f["modified"],
                 "size": f["size"],
                 "permissions": "rw",
-                "path": _join_moonraker_path(path, f["name"]),
+                "path": f["name"] if path == "gcodes" else _join_moonraker_path(path[7:] if path.startswith("gcodes/") else path, f["name"]),
             })
         else:
             files.append({
@@ -527,7 +567,7 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
                 "modified": f["modified"],
                 "size": f["size"],
                 "permissions": "rw",
-                "path": _join_moonraker_path(path, f["name"]),
+                "path": f["name"] if path == "gcodes" else _join_moonraker_path(path[7:] if path.startswith("gcodes/") else path, f["name"]),
             })
     
     result = {
@@ -541,7 +581,7 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
         "root_info": {
             "name": "gcodes",
             "permissions": "rw",
-            "path": "gcodes",
+            "path": "/home/pi/printer_data/gcodes",
         }
     }
     
@@ -551,7 +591,7 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
 @router.post("/server/files/upload")
 async def file_upload(
     file: UploadFile = File(...),
-    path: str = None,
+    path: str = "gcodes",
     print: bool = False,
     plate: int = 1,
 ):
@@ -559,6 +599,15 @@ async def file_upload(
         # Save uploaded file to a temp location first
         suffix = os.path.splitext(file.filename or "")[1] or ".gcode"
         temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
+        
+        # Determine remote path based on "path" form field
+        # "path" is usually "gcodes" or "gcodes/subdir"
+        remote_filename = file.filename
+        if path and path.startswith("gcodes/"):
+            subdir = path[7:].strip("/")
+            if subdir:
+                remote_filename = f"{subdir}/{file.filename}"
+
         try:
             # Write the uploaded file to temp
             with os.fdopen(temp_fd, 'wb') as tmp:
@@ -569,33 +618,46 @@ async def file_upload(
             await asyncio.to_thread(
                 ftps_client.upload_file,
                 temp_path,
-                file.filename,
+                remote_filename,
             )
             
-            # Invalidate file cache so next list is fresh
+            # Update cache incrementally
             sqlite_manager = get_sqlite_manager()
-            sqlite_manager.clear_file_cache()
-            
-            # Get file size
             file_size = len(content)
-
+            
+            # Add to cache
+            db_path = _join_moonraker_path("gcodes", remote_filename)
+            cache_item = {
+                "name": file.filename,
+                "path": db_path,
+                "size": file_size,
+                "modified": time.time(),
+                "is_dir": False
+            }
+            sqlite_manager.cache_files([cache_item])
+            
             print_started = False
             if print:
                 result = await bambu_client.start_print(
-                    filename=file.filename,
+                    filename=remote_filename, # Print defaults to root unless path given? Bambu needs relative path on SD?
+                    # The start_print method likely needs full path relative to SD root?
+                    # If I upload to "sub/foo", I should print "sub/foo".
+                    # Let's verify start_print.
                     plate_number=plate,
                     bed_leveling=True,
                 )
                 if "error" not in result:
                     print_started = True
                 else:
+                    # Log error but don't fail the HTTP request since upload succeeded
                     print(f"Auto-start failed: {result['error']}")
 
             return success_response({
                 "item": {
-                    "path": f"gcodes/{file.filename}",
+                    "path": db_path,
                     "size": file_size,
-                    "modified": time.time()
+                    "modified": int(time.time()),
+                    "permissions": "rw"
                 },
                 "print_started": print_started
             })
@@ -616,14 +678,33 @@ async def file_delete(filename: str):
     try:
         ftps_client.delete_file(filename)
         
-        # Invalidate file cache so next list is fresh
+        # Remove from cache incrementally to maintain robustness
         sqlite_manager = get_sqlite_manager()
-        sqlite_manager.clear_file_cache()
+        db_path = _join_moonraker_path("gcodes", filename)
+        sqlite_manager.remove_file(db_path)
         
         return success_response("ok")
     except Exception as e:
         print(f"Delete error: {e}")
         return error_response(500, f"Delete failed: {str(e)}")
+
+
+@router.get("/server/files/roots")
+async def file_roots():
+    return success_response({
+        "roots": [
+            {
+                "name": "gcodes",
+                "path": "/home/pi/printer_data/gcodes",
+                "permissions": "rw"
+            },
+            {
+                "name": "config",
+                "path": "/home/pi/printer_data/config",
+                "permissions": "rw"
+            }
+        ]
+    })
 
 
 @router.get("/server/files/{root}/{path:path}")
@@ -1269,12 +1350,12 @@ async def handle_jsonrpc(
             "roots": [
                 {
                     "name": "gcodes",
-                    "path": "gcodes",
+                    "path": "/home/pi/printer_data/gcodes",
                     "permissions": "rw"
                 },
                 {
                     "name": "config",
-                    "path": "config",
+                    "path": "/home/pi/printer_data/config",
                     "permissions": "rw"
                 }
             ]
@@ -1296,11 +1377,17 @@ async def handle_jsonrpc(
         path = params.get("path", "gcodes")
 
         if not Config.BAMBU_SERIAL and path == "gcodes":
+            # Just return mock listing
             response["result"] = _mock_directory_listing(path)
+            # Breaking out of if-elif chain is handled by return or just flow? 
+            # The structure uses if/elif. A return here is safe if I'm not careful with control flow.
+            # But the caller function returns response anyway. 
+            # Wait, `handle_jsonrpc` returns Optional[Dict].
+            # I should assign to response["result"] and let it fall through or return response.
+            # I will follow pattern: assign and return response.
             return response
         
         # Determine actual FTPS path to check
-        # Moonraker path is "gcodes/subdirectory", but we need relative for FTPS
         ftps_path = Config.BAMBU_FTPS_UPLOADS_DIR
         
         # If user is browsing a subdirectory of gcodes
@@ -1310,30 +1397,36 @@ async def handle_jsonrpc(
         
         sqlite_manager = get_sqlite_manager()
         
-        # NOTE: Current simple cache implementation assumes key is always "gcodes" list
-        # We need to update cache key to be path-specific
-        # For now, we only cache the root. Subdirs will bypass cache or we need to fix cache key.
-        # Let's simple check: if root, leverage cache. If subdir, fetch fresh (or update cache key logic).
-        
-        cached_files = None
-        if path == "gcodes":
-             cached_files = sqlite_manager.get_cached_files(max_age=300)
+        # Try fresh cache first (robust logic)
+        cached_files = sqlite_manager.get_cached_files(directory_path=path, max_age=300, allow_stale=False)
         
         if cached_files is None:
             # Cache miss - fetch from FTPS
-            print(f"Fetching files from FTPS for path: {ftps_path} (requested: {path})")
+            print(f"Fetching files from FTPS via RPC for path: {ftps_path} (requested: {path})")
             try:
                 remote_files = ftps_client.list_files(ftps_path)
-                # Only cache the root listing for now to avoid complexity
-                if path == "gcodes":
-                    sqlite_manager.cache_files(remote_files)
+                
+                # Inject full path for caching to ensure subdirectories work
+                files_to_cache = []
+                for f in remote_files:
+                    f_with_path = f.copy()
+                    f_with_path["path"] = _join_moonraker_path(path, f["name"])
+                    files_to_cache.append(f_with_path)
+
+                # Cache the listing
+                sqlite_manager.cache_files(files_to_cache)
                 cached_files = remote_files
             except Exception as e:
-                print(f"Error fetching files from FTPS: {e}")
-                cached_files = []
+                print(f"RPC Error fetching files from FTPS: {e}")
+                # Fallback to stale
+                print("Attempting to fall back to stale cache (RPC)...")
+                cached_files = sqlite_manager.get_cached_files(directory_path=path, allow_stale=True)
+                
+                if cached_files is None:
+                    cached_files = []
         else:
-            print(f"Cache hit - returning {len(cached_files)} cached files")
-        
+             print(f"RPC Cache hit - returning {len(cached_files)} cached files")
+
         # Transform to Moonraker format
         dirs = []
         files = []
@@ -1360,14 +1453,14 @@ async def handle_jsonrpc(
             "dirs": dirs,
             "files": files,
             "disk_usage": {
-                "total": 32 * 1024 * 1024 * 1024, # 32GB Fake Total
-                "used": 1 * 1024 * 1024 * 1024,   # 1GB Fake Used
-                "free": 31 * 1024 * 1024 * 1024   # 31GB Fake Free
+                "total": 32 * 1024 * 1024 * 1024, 
+                "used": 1 * 1024 * 1024 * 1024,
+                "free": 31 * 1024 * 1024 * 1024
             },
             "root_info": {
-                "name": "gcodes", # Always the root name, even for subdirs
+                "name": "gcodes", 
                 "permissions": "rw",
-                "path": "gcodes",
+                "path": "/home/pi/printer_data/gcodes",
             }
         }
 

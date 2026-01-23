@@ -12,7 +12,7 @@ class StateManager:
             "fan_generic chamber": {"speed": 0.0},
             "fan_aux": {"speed": 0.0},
             "fan_chamber": {"speed": 0.0},
-            "virtual_sdcard": {"progress": 0.0, "is_active": False, "file_position": 0},
+            "virtual_sdcard": {"progress": 0.0, "is_active": False, "file_position": 0, "file_path": None},
             "display_status": {"progress": 0.0, "message": ""},
             "heaters": {
                 "available_heaters": ["extruder", "heater_bed"],
@@ -60,7 +60,7 @@ class StateManager:
                         "pin": "fan2"
                     },
                     "virtual_sdcard": {
-                        "path": "/tmp/gcodes"
+                        "path": "/home/pi/printer_data/gcodes"
                     },
                     "pause_resume": {},
                     "display_status": {},
@@ -99,7 +99,7 @@ class StateManager:
                         "pin": "fan2"
                     },
                     "virtual_sdcard": {
-                        "path": "/tmp/gcodes"
+                        "path": "/home/pi/printer_data/gcodes"
                     },
                     "pause_resume": {},
                     "display_status": {},

@@ -20,6 +20,10 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Create directories explicitly to satisfy path checks
+RUN mkdir -p /home/pi/printer_data/gcodes /home/pi/printer_data/config \
+    && chmod 777 /home/pi/printer_data/gcodes /home/pi/printer_data/config
+
 COPY . /app
 
 RUN curl -L -o /tmp/mainsail.zip ${MAINSAIL_URL} \

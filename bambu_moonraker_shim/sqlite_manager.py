@@ -108,49 +108,77 @@ class SQLiteManager:
                     fetched_at
                 ))
     
-    def get_cached_files(self, max_age: int = 300) -> Optional[List[Dict[str, Any]]]:
+    def get_cached_files(self, directory_path: str = "gcodes", max_age: int = 300, allow_stale: bool = False) -> Optional[List[Dict[str, Any]]]:
         """
-        Get cached file listing if not stale.
+        Get cached file listing.
         
         Args:
-            max_age: Maximum age in seconds (default 5 minutes)
+            directory_path: The Moonraker path to list (e.g. "gcodes" or "gcodes/subdir")
+            max_age: Maximum age in seconds.
+            allow_stale: If True, return data even if older than max_age (fallback mode).
         
         Returns:
-            List of file dicts or None if cache is stale/empty
+            List of file dicts or None if cache is missing/stale (and not allow_stale)
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Check if cache exists and is fresh
-            cursor.execute("SELECT MAX(fetched_at) as latest FROM file_cache")
+            # Check for latest fetch time for this folder (approximate by checking any file in it)
+            # We use a LIKE query to find files belonging to this directory
+            like_pattern = f"{directory_path}/%"
+            
+            cursor.execute("SELECT MAX(fetched_at) as latest FROM file_cache WHERE path LIKE ?", (like_pattern,))
             row = cursor.fetchone()
             
-            if not row['latest']:
+            if not row or not row['latest']:
                 return None
             
             age = time.time() - row['latest']
-            if age > max_age:
+            if age > max_age and not allow_stale:
                 return None
             
-            # Return cached files
+            # Return cached files for this directory
+            # We filter for direct children: path starts with dir/ but has no more slashes usually
+            # But simple LIKE matches recursive. For now, we'll return all matching prefix
+            # and let the caller or simple python logic filter if strictly needed, 
+            # BUT: cache_files stores whatever list_files returned.
+            # If we previously cached "gcodes/foo", and we ask for "gcodes", we get it.
+            # If we asked for "gcodes/sub", we previously cached "gcodes/sub/bar".
+            # The issue is "dirty" cache overlaps.
+            # For simplicity in this robust-caching step: return all files matching the prefix.
+            
             cursor.execute("""
-                SELECT filename as name, size, modified, is_dir, path
+                SELECT filename as name, size, modified, is_dir, path, fetched_at
                 FROM file_cache
+                WHERE path LIKE ?
                 ORDER BY is_dir DESC, filename ASC
-            """)
+            """, (like_pattern,))
             
             files = []
             for row in cursor.fetchall():
-                files.append({
-                    'name': row['name'],
-                    'size': row['size'],
-                    'modified': row['modified'],
-                    'is_dir': bool(row['is_dir']),
-                    'path': row['path']
-                })
+                # Strict directory check: ensure it's a direct child
+                # relative_path = path - directory_path - /
+                rel_path = row['path'][len(directory_path)+1:]
+                if '/' not in rel_path:
+                    files.append({
+                        'name': row['name'],
+                        'size': row['size'],
+                        'modified': row['modified'],
+                        'is_dir': bool(row['is_dir']),
+                        'path': row['path']
+                    })
             
+            if not files and age > max_age and not allow_stale:
+                 return None
+
             return files
     
+    def remove_file(self, path: str):
+        """Remove a single file from cache."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM file_cache WHERE path = ?", (path,))
+
     def clear_file_cache(self):
         """Clear all cached files."""
         with self.get_connection() as conn:
