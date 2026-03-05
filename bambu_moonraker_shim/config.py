@@ -7,6 +7,7 @@ class Config:
     BAMBU_HOST = os.getenv("BAMBU_HOST", "192.168.1.100")
     BAMBU_SERIAL = os.getenv("BAMBU_SERIAL", "")
     BAMBU_ACCESS_CODE = os.getenv("BAMBU_ACCESS_CODE", "")
+    BAMBU_MODEL = os.getenv("BAMBU_MODEL", "")
     BAMBU_MODE = os.getenv("BAMBU_MODE", "local")  # local | cloud
     
     # Cloud specific
@@ -23,7 +24,6 @@ class Config:
     BAMBU_FTPS_USER = os.getenv("BAMBU_FTPS_USER", "bblp")
     BAMBU_FTPS_PASS = os.getenv("BAMBU_FTPS_PASS", BAMBU_ACCESS_CODE)
     BAMBU_FTPS_UPLOADS_DIR = os.getenv("BAMBU_FTPS_UPLOADS_DIR", "/")
-    BAMBU_FORCE_HEATER_WAIT = os.getenv("BAMBU_FORCE_HEATER_WAIT", "true")
 
     # Paths
     GCODES_DIR = os.getenv("GCODES_DIR", "gcodes")

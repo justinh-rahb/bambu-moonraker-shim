@@ -59,8 +59,9 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
 * **Print control**:
   * Pause / Resume / Cancel prints
 * **Temperature control**:
-  * Set bed temperature (via M140/M190 or Moonraker commands)
-  * Set extruder temperature (via M104/M109 or Moonraker commands)
+  * Set bed temperature (M140 / Moonraker commands)
+  * Set extruder temperature (M104 T0 / Moonraker commands)
+  * Set chamber temperature (M141 / Moonraker commands)
 * **Klipper macro support**:
   * `PRINT_START` / `START_PRINT` (with bed/hotend/chamber parameters)
   * `PRINT_END` / `END_PRINT`
@@ -84,7 +85,6 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
 ## What Does NOT Work (Yet)
 
 * ❌ Start prints from uploaded files (basic implementation exists)
-* ❌ Reliably turning off heaters (firmware limitation - see Known Issues)
 * ❌ Full interactive G-code console
 * ❌ Custom user-defined Klipper macros
 * ❌ Webcam bridging
@@ -134,6 +134,7 @@ Create a `.env` file in the project root:
 BAMBU_HOST=192.168.1.100
 BAMBU_ACCESS_CODE=12345678
 BAMBU_SERIAL=01P00A12345678
+BAMBU_MODEL=P1S
 
 # Connection Mode
 BAMBU_MODE=local
@@ -152,6 +153,7 @@ BAMBU_FTPS_UPLOADS_DIR=/
 * **BAMBU_HOST**: Your printer's IP address (find in printer settings)
 * **BAMBU_ACCESS_CODE**: LAN access code (displayed on printer screen)
 * **BAMBU_SERIAL**: Printer serial number (displayed on printer screen)
+* **BAMBU_MODEL**: Optional model hint (`H2D`, `P2S`, `N7`, `A1`, `A1 Mini`) for model-specific command behavior
 * **BAMBU_MODE**: Use `local` for LAN-only mode (recommended)
 
 ## Usage
@@ -245,30 +247,30 @@ The shim supports multiple ways to control heater temperatures:
 
 #### Via G-code
 ```gcode
-M104 S220        # Set extruder to 220°C (non-blocking)
-M109 S220        # Set extruder to 220°C and wait
+M104 T0 S220     # Set extruder to 220°C (non-blocking)
 M140 S60         # Set bed to 60°C (non-blocking)
-M190 S60         # Set bed to 60°C and wait
+M141 S45         # Set chamber to 45°C (non-blocking)
 ```
 
 #### Via Moonraker Command
 ```gcode
 SET_HEATER_TEMPERATURE HEATER=extruder TARGET=220
 SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60
+SET_HEATER_TEMPERATURE HEATER=heater_chamber TARGET=45
 ```
 
 ### Supported Ranges
 
 * **Bed**: 0-120°C
 * **Extruder**: 0-300°C
+* **Chamber**: 0-70°C
 
 ### Important Notes
 
-**Known firmware limitations:**
-* **M140 (non-blocking bed heat)** may not work when sent via MQTT `gcode_line` - use M190 instead
-* **M104 S0 / M140 S0** may not reliably turn off heaters - workaround is to use the printer's touchscreen or allow natural cooling
-* **M190 and M109** (wait variants) work reliably for setting temperatures
-* Temperature commands in uploaded G-code files work normally (all variants)
+**Behavior notes:**
+* Heater commands are always sent as non-blocking MQTT G-code (`M104 T0`, `M140`, `M141`)
+* `M109`/`M190` requests are accepted for compatibility but mapped to non-blocking behavior
+* The shim tracks target temperatures locally when MQTT telemetry does not immediately echo targets
 
 ## Klipper Macro Support
 
@@ -287,15 +289,14 @@ START_PRINT BED=60 HOTEND=220 CHAMBER=45
 **Supported parameters:**
 * `BED` or `BED_TEMP` - Bed temperature
 * `HOTEND`, `EXTRUDER`, or `EXTRUDER_TEMP` - Nozzle temperature
-* `CHAMBER` - Chamber temperature (accepted but not active on most models)
+* `CHAMBER` - Chamber temperature target
 
 **Actions performed:**
 1. Home all axes (G28)
 2. Heat bed to target temperature (non-blocking)
 3. Heat nozzle to target temperature (non-blocking)
-4. Wait for bed temperature
-5. Wait for nozzle temperature
-6. Auto-leveling (handled automatically by Bambu printer)
+4. Heat chamber to target temperature when provided (non-blocking)
+5. Auto-leveling (handled automatically by Bambu printer)
 
 ### PRINT_END / END_PRINT
 
@@ -311,7 +312,7 @@ END_PRINT
 2. Turn off all fans (part cooling, aux, chamber)
 3. Disable motors
 
-**Note:** Due to Bambu firmware limitations, heaters may not turn off immediately. They will naturally cool down over time.
+**Note:** Heaters are turned down with non-blocking commands; cooling behavior is firmware-controlled.
 
 ### Other Supported Macros
 
@@ -362,9 +363,8 @@ END_PRINT
 
 ### Temperature Control
 
-* **M140 (non-blocking bed heat)**: Does not work reliably when sent via MQTT. Use M190 instead or send commands from within G-code files.
-* **Turning off heaters**: `M104 S0` and `M140 S0` may not turn off heaters when sent via MQTT. Current workaround is to use the printer's touchscreen or wait for natural cooling. This appears to be a Bambu firmware limitation.
-* **M190/M109 (wait variants)**: These work reliably for setting temperatures.
+* The shim intentionally uses non-blocking heater commands over MQTT (`M104 T0`, `M140`, `M141`)
+* Firmware behavior can vary by printer and firmware revision
 
 ### FTPS File Operations
 
@@ -392,10 +392,11 @@ END_PRINT
 
 ### Temperature Commands Not Working
 
-1. **For heating**: Use M190 (bed) or M109 (extruder) instead of M140/M104
-2. **For turning off**: Use printer touchscreen to disable heaters, or wait for natural cooling
-3. Ensure printer is in LAN-only mode (not connected to cloud)
-4. Check that commands sent via console include proper formatting
+1. **For heating**: Use `M104 T0`, `M140`, and `M141` or `SET_HEATER_TEMPERATURE`
+2. **For direct control**: Use `M104 T0`, `M140`, and `M141` or `SET_HEATER_TEMPERATURE`
+3. **For turning off**: Set target to `0` and allow firmware-managed cooldown
+4. Ensure printer is in LAN-only mode (not connected to cloud)
+5. Check that commands sent via console include proper formatting
 
 ### Macros Not Working
 
@@ -413,7 +414,6 @@ END_PRINT
 
 ## Limitations / Roadmap
 
-* Fix heater off commands (investigating Bambu firmware behavior)
 * Better start print implementation
 * Full G-code console with command history
 * User-defined custom macros

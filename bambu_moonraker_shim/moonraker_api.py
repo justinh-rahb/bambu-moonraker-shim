@@ -7,7 +7,7 @@ import os
 import tempfile
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, UploadFile, File
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from bambu_moonraker_shim.state_manager import state_manager
 from bambu_moonraker_shim.bambu_client import bambu_client
 from bambu_moonraker_shim.config import Config
@@ -17,6 +17,12 @@ from bambu_moonraker_shim.ftps_client import ftps_client
 from bambu_moonraker_shim.sqlite_manager import get_sqlite_manager
 
 router = APIRouter()
+
+_DEFAULT_DISK_USAGE = {
+    "total": 32 * 1024 * 1024 * 1024,
+    "used": 1 * 1024 * 1024 * 1024,
+    "free": 31 * 1024 * 1024 * 1024,
+}
 
 CONFIG_FILES = {
     "printer.cfg": "\n".join(
@@ -93,11 +99,7 @@ def _config_directory_listing():
     return {
         "dirs": [],
         "files": files,
-        "disk_usage": {
-            "total": 32 * 1024 * 1024 * 1024,  # 32GB
-            "used": 1 * 1024 * 1024 * 1024,  # 1GB
-            "free": 31 * 1024 * 1024 * 1024,  # 31GB
-        },
+        "disk_usage": dict(_DEFAULT_DISK_USAGE),
         "root_info": {
             "name": "config",
             "permissions": "rw",
@@ -136,11 +138,7 @@ def _mock_directory_listing(path: str) -> Dict[str, Any]:
     return {
         "dirs": [],
         "files": files,
-        "disk_usage": {
-            "total": 32 * 1024 * 1024 * 1024,  # 32GB
-            "used": 1 * 1024 * 1024 * 1024,  # 1GB
-            "free": 31 * 1024 * 1024 * 1024,  # 31GB
-        },
+        "disk_usage": dict(_DEFAULT_DISK_USAGE),
         "root_info": {
             "name": "gcodes",
             "permissions": "rw",
@@ -188,6 +186,48 @@ def _build_file_list(root: str) -> List[Dict[str, Any]]:
     return files
 
 
+def _get_disk_usage(root: str) -> Dict[str, int]:
+    if root == "config" or not Config.BAMBU_SERIAL:
+        return dict(_DEFAULT_DISK_USAGE)
+    try:
+        return ftps_client.get_storage_info()
+    except Exception as exc:
+        print(f"Disk usage lookup failed: {exc}")
+        return dict(_DEFAULT_DISK_USAGE)
+
+
+def _m220_percent_to_mode(percent: float) -> int:
+    # Bambu fixed speed presets: 1=silent (50), 2=standard (100), 3=sport (124), 4=ludicrous (166).
+    presets = {1: 50.0, 2: 100.0, 3: 124.0, 4: 166.0}
+    return min(presets, key=lambda mode: abs(percent - presets[mode]))
+
+
+def _extract_skip_object_ids(params: Dict[str, str]) -> List[int]:
+    ids: List[int] = []
+    for key in ("OBJECT", "OBJ", "ID"):
+        value = params.get(key)
+        if value is None:
+            continue
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            pass
+    name_value = params.get("NAME")
+    if name_value:
+        digits = "".join(ch for ch in name_value if ch.isdigit())
+        if digits:
+            try:
+                ids.append(int(digits))
+            except (TypeError, ValueError):
+                pass
+    # Preserve order while deduplicating.
+    deduped: List[int] = []
+    for object_id in ids:
+        if object_id not in deduped:
+            deduped.append(object_id)
+    return deduped
+
+
 @router.get("/access/oneshot_token")
 async def access_oneshot_token():
     token = secrets.token_urlsafe(32)
@@ -226,6 +266,7 @@ def _is_macro_command(command: str) -> bool:
         "LOAD_FILAMENT",
         "UNLOAD_FILAMENT",
         "BED_MESH_CALIBRATE",
+        "EXCLUDE_OBJECT",
     }
     if first_word in known_macros:
         return True
@@ -280,42 +321,40 @@ async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, An
         chamber_temp, error = _parse_macro_param(params, ["CHAMBER"])
         if error:
             return {"error": error}
-        if chamber_temp is not None:
-            print("Warning: CHAMBER temperature requested but not supported.")
 
         await bambu_client.send_gcode_line("G28 \n")
 
         if bed_temp is not None:
-            result = await bambu_client.set_bed_temp(bed_temp, wait=False)
+            result = await bambu_client.set_bed_temp(bed_temp)
             if "error" in result:
                 return result
             await state_manager.update_state({"heater_bed": {"target": bed_temp}})
         if hotend_temp is not None:
-            result = await bambu_client.set_nozzle_temp(hotend_temp, wait=False)
+            result = await bambu_client.set_nozzle_temp(hotend_temp)
             if "error" in result:
                 return result
             await state_manager.update_state({"extruder": {"target": hotend_temp}})
-
-        if bed_temp and bed_temp > 0:
-            result = await bambu_client.set_bed_temp(bed_temp, wait=True)
+        if chamber_temp is not None:
+            result = await bambu_client.set_chamber_temp(chamber_temp)
             if "error" in result:
                 return result
-        if hotend_temp and hotend_temp > 0:
-            result = await bambu_client.set_nozzle_temp(hotend_temp, wait=True)
-            if "error" in result:
-                return result
+            await state_manager.update_state({"heater_chamber": {"target": chamber_temp}})
 
         return {"result": "ok", "action": "print_start"}
 
     if macro_name in ("PRINT_END", "END_PRINT"):
-        result = await bambu_client.set_nozzle_temp(0, wait=False)
+        result = await bambu_client.set_nozzle_temp(0)
         if "error" in result:
             return result
         await state_manager.update_state({"extruder": {"target": 0}})
-        result = await bambu_client.set_bed_temp(0, wait=False)
+        result = await bambu_client.set_bed_temp(0)
         if "error" in result:
             return result
         await state_manager.update_state({"heater_bed": {"target": 0}})
+        result = await bambu_client.set_chamber_temp(0)
+        if "error" in result:
+            return result
+        await state_manager.update_state({"heater_chamber": {"target": 0}})
 
         await bambu_client.send_gcode_line("M106 P1 S0 \n")
         await bambu_client.send_gcode_line("M106 P2 S0 \n")
@@ -323,14 +362,18 @@ async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, An
         return {"result": "ok", "action": "print_end"}
 
     if macro_name in ("HEATERS_OFF", "TURN_OFF_HEATERS"):
-        result = await bambu_client.set_nozzle_temp(0, wait=True)
+        result = await bambu_client.set_nozzle_temp(0)
         if "error" in result:
             return result
         await state_manager.update_state({"extruder": {"target": 0}})
-        result = await bambu_client.set_bed_temp(0, wait=True)
+        result = await bambu_client.set_bed_temp(0)
         if "error" in result:
             return result
         await state_manager.update_state({"heater_bed": {"target": 0}})
+        result = await bambu_client.set_chamber_temp(0)
+        if "error" in result:
+            return result
+        await state_manager.update_state({"heater_chamber": {"target": 0}})
         return {"result": "ok", "action": "heaters_off"}
 
     if macro_name == "PAUSE":
@@ -349,9 +392,39 @@ async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, An
         print("BED_MESH_CALIBRATE requested; Bambu handles leveling automatically.")
         return {"result": "ok", "action": "bed_mesh_calibrate"}
 
-    if macro_name in ("LOAD_FILAMENT", "UNLOAD_FILAMENT"):
-        print(f"{macro_name} requested; no Bambu macro translation available.")
-        return {"result": "ok", "action": macro_name.lower()}
+    if macro_name == "LOAD_FILAMENT":
+        tray = params.get("TRAY_ID") or params.get("TRAY") or params.get("SLOT") or "0"
+        ams_id = params.get("AMS_ID") or "0"
+        slot_id = params.get("SLOT_ID") or params.get("SLOT") or "0"
+        try:
+            tray_id = int(tray)
+            ams_index = int(ams_id)
+            slot_index = int(slot_id)
+        except (TypeError, ValueError):
+            return {"error": "LOAD_FILAMENT expects numeric TRAY_ID/AMS_ID/SLOT_ID"}
+        result = await bambu_client.ams_load_filament(
+            tray_id=tray_id,
+            ams_id=ams_index,
+            slot_id=slot_index,
+        )
+        if "error" in result:
+            return result
+        return {"result": "ok", "action": "load_filament"}
+
+    if macro_name == "UNLOAD_FILAMENT":
+        result = await bambu_client.ams_unload_filament()
+        if "error" in result:
+            return result
+        return {"result": "ok", "action": "unload_filament"}
+
+    if macro_name == "EXCLUDE_OBJECT":
+        object_ids = _extract_skip_object_ids(params)
+        if not object_ids:
+            return {"error": "EXCLUDE_OBJECT requires OBJECT, ID, or NAME with digits"}
+        result = await bambu_client.skip_objects(object_ids)
+        if "error" in result:
+            return result
+        return {"result": "ok", "action": "exclude_object", "objects": object_ids}
 
     return {"error": f"Unsupported macro: {macro_name}"}
 
@@ -533,11 +606,7 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
     result = {
         "dirs": dirs,
         "files": files,
-        "disk_usage": {
-            "total": 32 * 1024 * 1024 * 1024, # 32GB
-            "used": 1 * 1024 * 1024 * 1024,   # 1GB
-            "free": 31 * 1024 * 1024 * 1024   # 31GB
-        },
+        "disk_usage": _get_disk_usage("gcodes"),
         "root_info": {
             "name": "gcodes",
             "permissions": "rw",
@@ -636,6 +705,21 @@ async def file_download(root: str, path: str):
         content = CONFIG_FILES.get(path)
         if content is not None:
             return PlainTextResponse(content)
+    if root == "gcodes":
+        if not Config.BAMBU_SERIAL:
+            return error_response(404, "File not found")
+        try:
+            payload = await asyncio.to_thread(ftps_client.download_file, path)
+        except FileNotFoundError:
+            return error_response(404, "File not found")
+        except Exception as exc:
+            print(f"Download error ({path}): {exc}")
+            return error_response(500, "File download failed")
+        return Response(
+            content=payload,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{os.path.basename(path)}"'},
+        )
 
     # Generic 404 for now unless checked against real files
     return error_response(404, "File not found")
@@ -696,11 +780,30 @@ async def print_start(request: Request):
             return error_response(400, "Filename required")
         filename = _normalize_filename(filename)
         plate = body.get("plate", 1)
+        use_ams = bool(body.get("use_ams", False))
+        bed_leveling = bool(body.get("bed_leveling", body.get("auto_bed_leveling", True)))
+        flow_calibration = bool(body.get("flow_calibration", body.get("flow_cali", False)))
+        timelapse = bool(body.get("timelapse", False))
+        vibration_cali = bool(body.get("vibration_cali", True))
+        layer_inspect = bool(body.get("layer_inspect", False))
+        cfg = str(body.get("cfg", ""))
+        extrude_cali_flag = bool(body.get("extrude_cali_flag", False))
+        ams_mapping = body.get("ams_mapping")
+        ams_mapping2 = body.get("ams_mapping2")
         print(f"Requested start print: {filename}")
         result = await bambu_client.start_print(
             filename=filename,
             plate_number=plate,
-            bed_leveling=True,
+            use_ams=use_ams,
+            bed_leveling=bed_leveling,
+            flow_calibration=flow_calibration,
+            timelapse=timelapse,
+            vibration_cali=vibration_cali,
+            layer_inspect=layer_inspect,
+            cfg=cfg,
+            extrude_cali_flag=extrude_cali_flag,
+            ams_mapping=ams_mapping,
+            ams_mapping2=ams_mapping2,
         )
         if "error" in result:
             return error_response(500, result["error"])
@@ -1161,8 +1264,8 @@ async def handle_jsonrpc(
                 except Exception as e:
                     print(f"Error parsing SET_FAN_SPEED: {e}")
 
-            # Intercept heater commands (M104/M109/M140/M190)
-            if line.upper().startswith(("M104", "M109", "M140", "M190")):
+            # Intercept heater commands (M104/M109/M140/M190/M141/M191).
+            if line.upper().startswith(("M104", "M109", "M140", "M190", "M141", "M191")):
                 try:
                     parts = line.upper().split()
                     cmd = parts[0]
@@ -1180,9 +1283,11 @@ async def handle_jsonrpc(
                         return response
 
                     if cmd in ("M104", "M109"):
-                        result = await bambu_client.set_nozzle_temp(temp, wait=(cmd == "M109"))
+                        result = await bambu_client.set_nozzle_temp(temp)
                     elif cmd in ("M140", "M190"):
-                        result = await bambu_client.set_bed_temp(temp, wait=(cmd == "M190"))
+                        result = await bambu_client.set_bed_temp(temp)
+                    elif cmd in ("M141", "M191"):
+                        result = await bambu_client.set_chamber_temp(temp)
                     else:
                         result = {"error": f"Unsupported heater command: {cmd}"}
 
@@ -1193,10 +1298,36 @@ async def handle_jsonrpc(
                         await state_manager.update_state({"extruder": {"target": temp}})
                     elif cmd in ("M140", "M190"):
                         await state_manager.update_state({"heater_bed": {"target": temp}})
+                    elif cmd in ("M141", "M191"):
+                        await state_manager.update_state({"heater_chamber": {"target": temp}})
 
                     continue
                 except Exception as e:
                     print(f"Heater parse error: {e}")
+
+            # Intercept print speed scaling and map to Bambu speed modes.
+            if line.upper().startswith("M220"):
+                try:
+                    parts = line.upper().split()
+                    speed_percent = None
+                    for part in parts[1:]:
+                        if part.startswith("S"):
+                            speed_percent = float(part[1:])
+                            break
+                    if speed_percent is None:
+                        response["error"] = {
+                            "code": 400,
+                            "message": f"Missing S parameter in print speed command: {line}",
+                        }
+                        return response
+                    mode = _m220_percent_to_mode(speed_percent)
+                    result = await bambu_client.set_print_speed(mode)
+                    if "error" in result:
+                        response["error"] = {"code": 400, "message": result["error"]}
+                        return response
+                    continue
+                except Exception as e:
+                    print(f"Print speed parse error: {e}")
 
             # Intercept SET_HEATER_TEMPERATURE for Moonraker compatibility
             # Format: SET_HEATER_TEMPERATURE HEATER=<name> TARGET=<value>
@@ -1205,16 +1336,12 @@ async def handle_jsonrpc(
                     parts = line.split()
                     heater_name = None
                     target = None
-                    wait = False
                     for part in parts:
                         upper = part.upper()
                         if upper.startswith("HEATER="):
                             heater_name = part.split("=", 1)[1]
                         elif upper.startswith("TARGET="):
                             target = float(part.split("=", 1)[1])
-                        elif upper.startswith("WAIT="):
-                            wait_value = part.split("=", 1)[1].strip().lower()
-                            wait = wait_value in {"1", "true", "yes", "on"}
 
                     if heater_name is None or target is None:
                         response["error"] = {
@@ -1223,10 +1350,13 @@ async def handle_jsonrpc(
                         }
                         return response
 
+                    heater_name = heater_name.lower()
                     if heater_name == "extruder":
-                        result = await bambu_client.set_nozzle_temp(target, wait=wait)
+                        result = await bambu_client.set_nozzle_temp(target)
                     elif heater_name in ("heater_bed", "bed"):
-                        result = await bambu_client.set_bed_temp(target, wait=wait)
+                        result = await bambu_client.set_bed_temp(target)
+                    elif heater_name in ("heater_chamber", "chamber"):
+                        result = await bambu_client.set_chamber_temp(target)
                     else:
                         result = {"error": f"Unknown heater: {heater_name}"}
 
@@ -1237,6 +1367,8 @@ async def handle_jsonrpc(
                         await state_manager.update_state({"extruder": {"target": target}})
                     elif heater_name in ("heater_bed", "bed"):
                         await state_manager.update_state({"heater_bed": {"target": target}})
+                    elif heater_name in ("heater_chamber", "chamber"):
+                        await state_manager.update_state({"heater_chamber": {"target": target}})
                     continue
                 except Exception as e:
                     print(f"SET_HEATER_TEMPERATURE parse error: {e}")
@@ -1254,13 +1386,54 @@ async def handle_jsonrpc(
             return response
         filename = _normalize_filename(filename)
         plate = params.get("plate", 1)
+        use_ams = bool(params.get("use_ams", False))
+        bed_leveling = bool(params.get("bed_leveling", params.get("auto_bed_leveling", True)))
+        flow_calibration = bool(params.get("flow_calibration", params.get("flow_cali", False)))
+        timelapse = bool(params.get("timelapse", False))
+        vibration_cali = bool(params.get("vibration_cali", True))
+        layer_inspect = bool(params.get("layer_inspect", False))
+        cfg = str(params.get("cfg", ""))
+        extrude_cali_flag = bool(params.get("extrude_cali_flag", False))
+        ams_mapping = params.get("ams_mapping")
+        ams_mapping2 = params.get("ams_mapping2")
         result = await bambu_client.start_print(
             filename=filename,
             plate_number=plate,
-            bed_leveling=True,
+            use_ams=use_ams,
+            bed_leveling=bed_leveling,
+            flow_calibration=flow_calibration,
+            timelapse=timelapse,
+            vibration_cali=vibration_cali,
+            layer_inspect=layer_inspect,
+            cfg=cfg,
+            extrude_cali_flag=extrude_cali_flag,
+            ams_mapping=ams_mapping,
+            ams_mapping2=ams_mapping2,
         )
         if "error" in result:
             response["error"] = {"code": 500, "message": result["error"]}
+        else:
+            response["result"] = "ok"
+
+    elif method in ("printer.print.set_speed", "printer.print.speed"):
+        params = request.get("params", {})
+        mode = params.get("mode")
+        result = await bambu_client.set_print_speed(mode)
+        if "error" in result:
+            response["error"] = {"code": 400, "message": result["error"]}
+        else:
+            response["result"] = "ok"
+
+    elif method in ("printer.exclude_object", "printer.print.exclude_object"):
+        params = request.get("params", {})
+        object_ids = params.get("object_ids") or params.get("obj_list") or []
+        if not object_ids and "object_id" in params:
+            object_ids = [params.get("object_id")]
+        if not object_ids and "id" in params:
+            object_ids = [params.get("id")]
+        result = await bambu_client.skip_objects(object_ids)
+        if "error" in result:
+            response["error"] = {"code": 400, "message": result["error"]}
         else:
             response["result"] = "ok"
 
@@ -1359,11 +1532,7 @@ async def handle_jsonrpc(
         response["result"] = {
             "dirs": dirs,
             "files": files,
-            "disk_usage": {
-                "total": 32 * 1024 * 1024 * 1024, # 32GB Fake Total
-                "used": 1 * 1024 * 1024 * 1024,   # 1GB Fake Used
-                "free": 31 * 1024 * 1024 * 1024   # 31GB Fake Free
-            },
+            "disk_usage": _get_disk_usage("gcodes"),
             "root_info": {
                 "name": "gcodes", # Always the root name, even for subdirs
                 "permissions": "rw",

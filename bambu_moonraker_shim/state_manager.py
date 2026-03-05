@@ -7,6 +7,7 @@ class StateManager:
         self._state: Dict[str, Any] = {
             "extruder": {"temperature": 0.0, "target": 0.0, "power": 0.0, "pressure_advance": 0.0, "smooth_time": 0.0},
             "heater_bed": {"temperature": 0.0, "target": 0.0, "power": 0.0},
+            "heater_chamber": {"temperature": 0.0, "target": 0.0, "power": 0.0},
             "fan": {"speed": 0.0},
             "fan_generic aux": {"speed": 0.0},
             "fan_generic chamber": {"speed": 0.0},
@@ -15,8 +16,8 @@ class StateManager:
             "virtual_sdcard": {"progress": 0.0, "is_active": False, "file_position": 0},
             "display_status": {"progress": 0.0, "message": ""},
             "heaters": {
-                "available_heaters": ["extruder", "heater_bed"],
-                "available_sensors": ["extruder", "heater_bed"]
+                "available_heaters": ["extruder", "heater_bed", "heater_chamber"],
+                "available_sensors": ["extruder", "heater_bed", "heater_chamber"]
             },
             "print_stats": {
                 "state": "standby", # standby, printing, paused, complete, error, cancelling
@@ -49,6 +50,10 @@ class StateManager:
                     "heater_bed": {
                         "min_temp": 0,
                         "max_temp": 120
+                    },
+                    "heater_chamber": {
+                        "min_temp": 0,
+                        "max_temp": 70
                     },
                     "fan": {
                         "pin": "fan0"
@@ -88,6 +93,10 @@ class StateManager:
                     "heater_bed": {
                         "min_temp": "0",
                         "max_temp": "120"
+                    },
+                    "heater_chamber": {
+                        "min_temp": "0",
+                        "max_temp": "70"
                     },
                     "fan": {
                         "pin": "fan0"
@@ -131,7 +140,7 @@ class StateManager:
             }
         }
         self._max_temp_samples = 600
-        self._temperature_objects = {"extruder", "heater_bed"}
+        self._temperature_objects = {"extruder", "heater_bed", "heater_chamber"}
         self._temperature_history: Dict[str, Dict[str, List[float]]] = {}
         for sensor in self._temperature_objects:
             self._record_temperature_sample(sensor)
