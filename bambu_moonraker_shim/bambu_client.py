@@ -13,6 +13,7 @@ class BambuClient:
         self.access_code = Config.BAMBU_ACCESS_CODE
         self.serial = Config.BAMBU_SERIAL
         self.connected = False
+        self._mock_mode = False
         self._mqtt_client: Optional[aiomqtt.Client] = None
         self._sequence_id = 0
         self._local_targets: Dict[str, Dict[str, Any]] = {
@@ -21,11 +22,22 @@ class BambuClient:
             "heater_chamber": {"target": None, "set_time": 0.0},
         }
         self._local_target_max_age_seconds = 20 * 60
+        self._mock_target_nozzle = 0.0
+        self._mock_current_nozzle = 20.0
+        self._mock_target_bed = 0.0
+        self._mock_current_bed = 20.0
+        self._mock_target_chamber = 0.0
+        self._mock_current_chamber = 20.0
+        self._mock_progress = 0.0
+        self._mock_state = "standby"
+        self._mock_filename = "mock_file.gcode"
 
     async def start(self):
         """Starts the MQTT loop."""
         if not self.serial:
              print("Warning: BAMBU_SERIAL not set. Running in mock mode.")
+             self._mock_mode = True
+             self.connected = True
              asyncio.create_task(self._mock_loop())
              return
 
@@ -238,6 +250,11 @@ class BambuClient:
 
     async def publish_command(self, command: Dict[str, Any]):
         """Sends a JSON command to the printer request topic."""
+        if self._mock_mode:
+            command_with_sequence = self._inject_sequence_id(command)
+            print(f"[MOCK] MQTT Command: {json.dumps(command_with_sequence)}")
+            return
+
         if not self._mqtt_client or not self.connected:
             print("Cannot send command: MQTT disconnected.")
             return
@@ -251,6 +268,18 @@ class BambuClient:
     # --- Actions ---
     
     async def pause_print(self):
+        if self._mock_mode:
+            self._mock_state = "paused"
+            await state_manager.update_state(
+                {
+                    "print_stats": {"state": "paused", "filename": self._mock_filename},
+                    "virtual_sdcard": {
+                        "is_active": False,
+                        "progress": self._mock_progress,
+                    },
+                }
+            )
+            return
         cmd = {
             "print": {
                 "command": "pause"
@@ -259,6 +288,18 @@ class BambuClient:
         await self.publish_command(cmd)
 
     async def resume_print(self):
+        if self._mock_mode:
+            self._mock_state = "printing"
+            await state_manager.update_state(
+                {
+                    "print_stats": {"state": "printing", "filename": self._mock_filename},
+                    "virtual_sdcard": {
+                        "is_active": True,
+                        "progress": self._mock_progress,
+                    },
+                }
+            )
+            return
         cmd = {
             "print": {
                 "command": "resume"
@@ -267,6 +308,17 @@ class BambuClient:
         await self.publish_command(cmd)
         
     async def cancel_print(self):
+        if self._mock_mode:
+            self._mock_state = "standby"
+            self._mock_progress = 0.0
+            await state_manager.update_state(
+                {
+                    "print_stats": {"state": "standby", "filename": self._mock_filename},
+                    "virtual_sdcard": {"is_active": False, "progress": 0.0},
+                    "display_status": {"progress": 0.0},
+                }
+            )
+            return
         cmd = {
             "print": {
                 "command": "stop"
@@ -300,7 +352,7 @@ class BambuClient:
         ams_mapping2: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Start a print for a file already uploaded to the printer."""
-        if not self._mqtt_client or not self.connected:
+        if not self.connected:
             return {"error": "Printer not connected"}
 
         if not filename:
@@ -335,6 +387,19 @@ class BambuClient:
         cleaned_ams_mapping = self._normalize_ams_mapping(ams_mapping)
         cleaned_ams_mapping2 = self._normalize_ams_mapping2(ams_mapping2)
         subtask_name = self._subtask_name(normalized)
+
+        if self._mock_mode:
+            self._mock_filename = normalized
+            self._mock_state = "printing"
+            self._mock_progress = 0.0
+            await state_manager.update_state(
+                {
+                    "print_stats": {"state": "printing", "filename": normalized},
+                    "virtual_sdcard": {"is_active": True, "progress": 0.0},
+                    "display_status": {"progress": 0.0},
+                }
+            )
+            return {"result": "ok", "mock": True}
 
         cmd = {
             "print": {
@@ -442,10 +507,20 @@ class BambuClient:
                 f"{limits['safe_max']}°C."
             )
 
-        if not self._mqtt_client or not self.connected:
+        if not self.connected:
             return {"error": "Printer not connected"}
 
         rounded = int(round(target_value))
+        if self._mock_mode:
+            if heater == "extruder":
+                self._mock_target_nozzle = target_value
+            elif heater == "bed":
+                self._mock_target_bed = target_value
+            else:
+                self._mock_target_chamber = target_value
+            await self._track_local_target(heater, target_value)
+            return {"result": "ok", "mock": True}
+
         if heater == "extruder":
             gcode = f"M104 T0 S{rounded}\n"
         elif heater == "bed":
@@ -592,45 +667,55 @@ class BambuClient:
     # --- Mock Mode ---
     async def _mock_loop(self):
         print("Starting Mock Bambu Printer loop...")
-        
-        target_nozzle = 0
-        current_nozzle = 20
-        target_bed = 0
-        current_bed = 20
-        target_chamber = 0
-        current_chamber = 20
-        progress = 0
-        state = "standby"
 
         while True:
             await asyncio.sleep(1)
             
             # Simulate heating
-            if target_nozzle > current_nozzle: current_nozzle += 5
-            elif target_nozzle < current_nozzle: current_nozzle -= 2
+            if self._mock_target_nozzle > self._mock_current_nozzle:
+                self._mock_current_nozzle += 5
+            elif self._mock_target_nozzle < self._mock_current_nozzle:
+                self._mock_current_nozzle -= 2
             
-            if target_bed > current_bed: current_bed += 2
-            elif target_bed < current_bed: current_bed -= 1
+            if self._mock_target_bed > self._mock_current_bed:
+                self._mock_current_bed += 2
+            elif self._mock_target_bed < self._mock_current_bed:
+                self._mock_current_bed -= 1
 
-            if target_chamber > current_chamber: current_chamber += 1
-            elif target_chamber < current_chamber: current_chamber -= 1
+            if self._mock_target_chamber > self._mock_current_chamber:
+                self._mock_current_chamber += 1
+            elif self._mock_target_chamber < self._mock_current_chamber:
+                self._mock_current_chamber -= 1
 
             # Simulate printing
-            if state == "printing":
-                progress += 0.01
-                if progress >= 1.0:
-                    state = "complete"
-                    progress = 1.0
-                    target_nozzle = 0
-                    target_bed = 0
-                    target_chamber = 0
+            if self._mock_state == "printing":
+                self._mock_progress += 0.01
+                if self._mock_progress >= 1.0:
+                    self._mock_state = "complete"
+                    self._mock_progress = 1.0
+                    self._mock_target_nozzle = 0
+                    self._mock_target_bed = 0
+                    self._mock_target_chamber = 0
             
             updates = {
-                "extruder": {"temperature": current_nozzle, "target": target_nozzle},
-                "heater_bed": {"temperature": current_bed, "target": target_bed},
-                "heater_chamber": {"temperature": current_chamber, "target": target_chamber},
-                "print_stats": {"state": state, "filename": "mock_file.gcode"},
-                "virtual_sdcard": {"progress": progress, "is_active": state == "printing"}
+                "extruder": {
+                    "temperature": self._mock_current_nozzle,
+                    "target": self._mock_target_nozzle,
+                },
+                "heater_bed": {
+                    "temperature": self._mock_current_bed,
+                    "target": self._mock_target_bed,
+                },
+                "heater_chamber": {
+                    "temperature": self._mock_current_chamber,
+                    "target": self._mock_target_chamber,
+                },
+                "print_stats": {"state": self._mock_state, "filename": self._mock_filename},
+                "virtual_sdcard": {
+                    "progress": self._mock_progress,
+                    "is_active": self._mock_state == "printing",
+                },
+                "display_status": {"progress": self._mock_progress},
             }
             await state_manager.update_state(updates)
 

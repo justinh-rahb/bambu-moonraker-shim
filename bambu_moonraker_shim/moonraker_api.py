@@ -113,27 +113,57 @@ def _join_moonraker_path(root: str, name: str) -> str:
 
 
 def _mock_gcode_file() -> Dict[str, Any]:
+    _ensure_mock_file_exists()
+    mock_path = os.path.join(Config.GCODES_DIR, "mock_file.gcode")
+    stat_result = os.stat(mock_path)
     return {
         "name": "mock_file.gcode",
-        "size": 0,
-        "modified": time.time(),
+        "size": stat_result.st_size,
+        "modified": stat_result.st_mtime,
         "is_dir": False,
     }
+
+
+def _ensure_mock_file_exists():
+    os.makedirs(Config.GCODES_DIR, exist_ok=True)
+    mock_path = os.path.join(Config.GCODES_DIR, "mock_file.gcode")
+    if not os.path.exists(mock_path):
+        with open(mock_path, "w", encoding="utf-8") as fp:
+            fp.write("G28\nM104 T0 S200\nM140 S60\n")
+
+
+def _list_mock_local_files() -> List[Dict[str, Any]]:
+    _ensure_mock_file_exists()
+    files: List[Dict[str, Any]] = []
+    for entry in os.scandir(Config.GCODES_DIR):
+        if not entry.is_file():
+            continue
+        stat_result = entry.stat()
+        files.append(
+            {
+                "name": entry.name,
+                "size": stat_result.st_size,
+                "modified": stat_result.st_mtime,
+                "is_dir": False,
+            }
+        )
+    files.sort(key=lambda item: item["name"].lower())
+    return files
 
 
 def _mock_directory_listing(path: str) -> Dict[str, Any]:
     files = []
     if path == "gcodes":
-        mock_file = _mock_gcode_file()
-        files.append(
-            {
-                "filename": mock_file["name"],
-                "modified": mock_file["modified"],
-                "size": mock_file["size"],
-                "permissions": "rw",
-                "path": _join_moonraker_path(path, mock_file["name"]),
-            }
-        )
+        for mock_file in _list_mock_local_files():
+            files.append(
+                {
+                    "filename": mock_file["name"],
+                    "modified": mock_file["modified"],
+                    "size": mock_file["size"],
+                    "permissions": "rw",
+                    "path": _join_moonraker_path(path, mock_file["name"]),
+                }
+            )
 
     return {
         "dirs": [],
@@ -155,15 +185,17 @@ def _build_file_list(root: str) -> List[Dict[str, Any]]:
         return []
 
     if not Config.BAMBU_SERIAL:
-        mock_file = _mock_gcode_file()
-        return [
-            {
-                "path": _join_moonraker_path("gcodes", mock_file["name"]),
-                "size": mock_file["size"],
-                "modified": mock_file["modified"],
-                "permissions": "rw",
-            }
-        ]
+        files = []
+        for mock_file in _list_mock_local_files():
+            files.append(
+                {
+                    "path": _join_moonraker_path("gcodes", mock_file["name"]),
+                    "size": mock_file["size"],
+                    "modified": mock_file["modified"],
+                    "permissions": "rw",
+                }
+            )
+        return files
 
     # List files from printer via FTPS
     remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
@@ -306,7 +338,7 @@ def _normalize_filename(filename: str) -> str:
 
 
 async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, Any]:
-    if not bambu_client.connected:
+    if not bambu_client.connected and Config.BAMBU_SERIAL:
         return {"error": "Printer not connected"}
 
     if macro_name in ("PRINT_START", "START_PRINT"):
@@ -635,6 +667,34 @@ async def file_upload(
     plate: int = 1,
 ):
     try:
+        if not Config.BAMBU_SERIAL:
+            _ensure_mock_file_exists()
+            target_name = file.filename or "upload.gcode"
+            target_path = os.path.join(Config.GCODES_DIR, os.path.basename(target_name))
+            content = await file.read()
+            with open(target_path, "wb") as fp:
+                fp.write(content)
+
+            print_started = False
+            if print:
+                result = await bambu_client.start_print(
+                    filename=os.path.basename(target_path),
+                    plate_number=plate,
+                    bed_leveling=True,
+                )
+                print_started = "error" not in result
+
+            return success_response(
+                {
+                    "item": {
+                        "path": f"gcodes/{os.path.basename(target_path)}",
+                        "size": len(content),
+                        "modified": time.time(),
+                    },
+                    "print_started": print_started,
+                }
+            )
+
         # Save uploaded file to a temp location first
         suffix = os.path.splitext(file.filename or "")[1] or ".gcode"
         temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
@@ -693,6 +753,13 @@ async def file_upload(
 async def file_delete(filename: str):
     """Delete a file from the printer via FTPS."""
     try:
+        if not Config.BAMBU_SERIAL:
+            local_name = os.path.basename(filename)
+            local_path = os.path.join(Config.GCODES_DIR, local_name)
+            if os.path.exists(local_path):
+                os.unlink(local_path)
+            return success_response("ok")
+
         ftps_client.delete_file(filename)
         
         # Invalidate file cache so next list is fresh
@@ -717,7 +784,17 @@ async def file_download(root: str, path: str):
             return PlainTextResponse(content)
     if root == "gcodes":
         if not Config.BAMBU_SERIAL:
-            return error_response(404, "File not found")
+            local_name = os.path.basename(path)
+            local_path = os.path.join(Config.GCODES_DIR, local_name)
+            if not os.path.exists(local_path):
+                return error_response(404, "File not found")
+            with open(local_path, "rb") as fp:
+                payload = fp.read()
+            return Response(
+                content=payload,
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f'attachment; filename="{local_name}"'},
+            )
         try:
             payload = await asyncio.to_thread(ftps_client.download_file, path)
         except FileNotFoundError:
