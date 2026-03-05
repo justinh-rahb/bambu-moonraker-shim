@@ -218,6 +218,46 @@ def _build_file_list(root: str) -> List[Dict[str, Any]]:
     return files
 
 
+def _file_roots_payload() -> Dict[str, Any]:
+    return {
+        "roots": [
+            {
+                "name": "gcodes",
+                "path": "gcodes",
+                "permissions": "rw",
+            },
+            {
+                "name": "config",
+                "path": "config",
+                "permissions": "rw",
+            },
+        ]
+    }
+
+
+def _server_info_payload(include_history: bool = True) -> Dict[str, Any]:
+    components = [
+        "printer",
+        "websocket",
+        "database",
+        "file_manager",
+        "webcams",
+    ]
+    if include_history:
+        components.extend(["history", "job_queue"])
+
+    return {
+        "state": "ready",
+        "klippy_state": "ready",
+        "components": components,
+        "registered_directories": ["gcodes", "config"],
+        "failed_components": [],
+        "warnings": [],
+        "version": "v0.0.1-bambu-shim",
+        "api_version": [1, 0, 0],
+    }
+
+
 def _get_disk_usage(root: str) -> Dict[str, int]:
     if root == "config" or not Config.BAMBU_SERIAL:
         return dict(_DEFAULT_DISK_USAGE)
@@ -498,21 +538,7 @@ def flatten_to_nested(flat_dict: dict) -> dict:
 
 @router.get("/server/info")
 async def server_info():
-    return success_response(
-        {
-            "state": "ready",
-            "klippy_state": "ready",
-            "components": [
-                "printer",
-                "websocket",
-                "database",
-                "file_manager",
-                "webcams",
-            ],
-            "version": "v0.0.1-bambu-shim",
-            "api_version": [1, 0, 0],
-        }
-    )
+    return success_response(_server_info_payload(include_history=True))
 
 
 @router.get("/printer/info")
@@ -581,6 +607,11 @@ async def file_list(root: str = "gcodes"):
         print(f"Error listing files: {e}")
         # Return empty list on error rather than failing
         return success_response([])
+
+
+@router.get("/server/files/roots")
+async def file_roots():
+    return success_response(_file_roots_payload())
 
 
 @router.get("/server/files/directory")
@@ -812,6 +843,25 @@ async def file_download(root: str, path: str):
     return error_response(404, "File not found")
 
 
+@router.get("/server/files/metadata")
+async def file_metadata(filename: str):
+    return success_response(
+        {
+            "filename": filename,
+            "size": 1234,
+            "modified": time.time(),
+            "slicer": "BambuStudio",
+            "slicer_version": "unknown",
+            "layer_height": 0.2,
+            "first_layer_height": 0.2,
+            "object_height": 10.0,
+            "filament_total": 1000.0,
+            "estimated_time": 3600,
+            "thumbnails": [],
+        }
+    )
+
+
 @router.get("/server/database/item")
 async def database_get(namespace: str, key: str = None):
     # namespace is required, key is optional query param
@@ -1022,21 +1072,7 @@ async def handle_jsonrpc(
     response = {"jsonrpc": "2.0", "id": req_id}
 
     if method == "server.info":
-        response["result"] = {
-            "state": "ready",
-            "klippy_state": "ready",
-            "components": [
-                "printer",
-                "websocket",
-                "database",
-                "file_manager",
-                "webcams",
-                "history",
-                "job_queue",
-            ],
-            "version": "v0.0.1-bambu-shim",
-            "api_version": [1, 0, 0],
-        }
+        response["result"] = _server_info_payload(include_history=True)
     elif method == "printer.objects.list":
         keys = list(state_manager.get_state().keys())
         response["result"] = {"objects": keys}
@@ -1525,20 +1561,7 @@ async def handle_jsonrpc(
             response["result"] = "ok"
 
     elif method == "server.files.roots":
-        response["result"] = {
-            "roots": [
-                {
-                    "name": "gcodes",
-                    "path": "gcodes",
-                    "permissions": "rw"
-                },
-                {
-                    "name": "config",
-                    "path": "config",
-                    "permissions": "rw"
-                }
-            ]
-        }
+        response["result"] = _file_roots_payload()
 
     elif method == "server.files.list":
         params = request.get("params", {})
@@ -1554,6 +1577,10 @@ async def handle_jsonrpc(
         # Get file listing with caching
         params = request.get("params", {})
         path = params.get("path", "gcodes")
+
+        if path == "config":
+            response["result"] = _config_directory_listing()
+            return response
 
         if not Config.BAMBU_SERIAL and path == "gcodes":
             response["result"] = _mock_directory_listing(path)
