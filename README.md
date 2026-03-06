@@ -59,8 +59,9 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
 * **Print control**:
   * Pause / Resume / Cancel prints
 * **Temperature control**:
-  * Set bed temperature (via M140/M190 or Moonraker commands)
-  * Set extruder temperature (via M104/M109 or Moonraker commands)
+  * Set bed temperature (M190 / Moonraker commands)
+  * Set extruder temperature (M109 / Moonraker commands)
+  * Set chamber temperature (M191 / Moonraker commands)
 * **Klipper macro support**:
   * `PRINT_START` / `START_PRINT` (with bed/hotend/chamber parameters)
   * `PRINT_END` / `END_PRINT`
@@ -77,14 +78,14 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
 
 ### Files (Partial / Experimental)
 
+* Mainsail file browser compatibility (`gcodes` + `config` roots)
 * File listing (via printer FTPS)
 * File upload (via FTPS)
 * File deletion (via FTPS)
+* File download endpoint for `gcodes` (local in mock mode, FTPS-backed with printer)
 
 ## What Does NOT Work (Yet)
 
-* ❌ Start prints from uploaded files (basic implementation exists)
-* ❌ Reliably turning off heaters (firmware limitation - see Known Issues)
 * ❌ Full interactive G-code console
 * ❌ Custom user-defined Klipper macros
 * ❌ Webcam bridging
@@ -134,6 +135,7 @@ Create a `.env` file in the project root:
 BAMBU_HOST=192.168.1.100
 BAMBU_ACCESS_CODE=12345678
 BAMBU_SERIAL=01P00A12345678
+BAMBU_MODEL=P1S
 
 # Connection Mode
 BAMBU_MODE=local
@@ -152,6 +154,7 @@ BAMBU_FTPS_UPLOADS_DIR=/
 * **BAMBU_HOST**: Your printer's IP address (find in printer settings)
 * **BAMBU_ACCESS_CODE**: LAN access code (displayed on printer screen)
 * **BAMBU_SERIAL**: Printer serial number (displayed on printer screen)
+* **BAMBU_MODEL**: Optional model hint (`H2D`, `P2S`, `N7`, `A1`, `A1 Mini`) for model-specific behavior. `P1*`/`A1*` models hide chamber temperature objects in Mainsail.
 * **BAMBU_MODE**: Use `local` for LAN-only mode (recommended)
 
 ## Usage
@@ -195,6 +198,8 @@ docker build -t bambu-moonraker-shim .
 docker run \
   --env-file .env \
   -p 8080:80 \
+  -v "$PWD/bambu_shim.db:/app/bambu_shim.db" \
+  -v "$PWD/moonraker.json:/app/moonraker.json" \
   bambu-moonraker-shim
 ```
 
@@ -214,6 +219,8 @@ If bridge networking causes issues, use host mode:
 docker run \
   --env-file .env \
   --network host \
+  -v "$PWD/bambu_shim.db:/app/bambu_shim.db" \
+  -v "$PWD/moonraker.json:/app/moonraker.json" \
   bambu-moonraker-shim
 ```
 
@@ -221,6 +228,31 @@ Access Mainsail at:
 
 ```
 http://localhost
+```
+
+### Persistent Data
+
+The bind mounts above persist runtime data across container restarts:
+
+* `bambu_shim.db` - SQLite data store used by the shim
+* `moonraker.json` - Moonraker-style JSON database (Mainsail settings, webcam entries, etc.)
+
+Create files once if needed:
+
+```bash
+touch bambu_shim.db moonraker.json
+```
+
+### Mock Mode (No Printer)
+
+To run in mock mode (no `BAMBU_SERIAL` / no `.env`), start without `--env-file`:
+
+```bash
+docker run \
+  -p 8080:80 \
+  -v "$PWD/bambu_shim.db:/app/bambu_shim.db" \
+  -v "$PWD/moonraker.json:/app/moonraker.json" \
+  bambu-moonraker-shim
 ```
 
 ## Fan Control
@@ -245,30 +277,29 @@ The shim supports multiple ways to control heater temperatures:
 
 #### Via G-code
 ```gcode
-M104 S220        # Set extruder to 220°C (non-blocking)
-M109 S220        # Set extruder to 220°C and wait
-M140 S60         # Set bed to 60°C (non-blocking)
-M190 S60         # Set bed to 60°C and wait
+M109 S220        # Set extruder to 220°C
+M190 S60         # Set bed to 60°C
+M191 S45         # Set chamber to 45°C
 ```
 
 #### Via Moonraker Command
 ```gcode
 SET_HEATER_TEMPERATURE HEATER=extruder TARGET=220
 SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60
+SET_HEATER_TEMPERATURE HEATER=heater_chamber TARGET=45
 ```
 
 ### Supported Ranges
 
 * **Bed**: 0-120°C
 * **Extruder**: 0-300°C
+* **Chamber**: 0-70°C
 
 ### Important Notes
 
-**Known firmware limitations:**
-* **M140 (non-blocking bed heat)** may not work when sent via MQTT `gcode_line` - use M190 instead
-* **M104 S0 / M140 S0** may not reliably turn off heaters - workaround is to use the printer's touchscreen or allow natural cooling
-* **M190 and M109** (wait variants) work reliably for setting temperatures
-* Temperature commands in uploaded G-code files work normally (all variants)
+**Behavior notes:**
+* Heater commands are sent using MQTT G-code (`M109`, `M190`, `M191`)
+* The shim tracks target temperatures locally when MQTT telemetry does not immediately echo targets
 
 ## Klipper Macro Support
 
@@ -287,15 +318,14 @@ START_PRINT BED=60 HOTEND=220 CHAMBER=45
 **Supported parameters:**
 * `BED` or `BED_TEMP` - Bed temperature
 * `HOTEND`, `EXTRUDER`, or `EXTRUDER_TEMP` - Nozzle temperature
-* `CHAMBER` - Chamber temperature (accepted but not active on most models)
+* `CHAMBER` - Chamber temperature target
 
 **Actions performed:**
 1. Home all axes (G28)
-2. Heat bed to target temperature (non-blocking)
-3. Heat nozzle to target temperature (non-blocking)
-4. Wait for bed temperature
-5. Wait for nozzle temperature
-6. Auto-leveling (handled automatically by Bambu printer)
+2. Heat bed to target temperature
+3. Heat nozzle to target temperature
+4. Heat chamber to target temperature when provided
+5. Auto-leveling (handled automatically by Bambu printer)
 
 ### PRINT_END / END_PRINT
 
@@ -311,7 +341,7 @@ END_PRINT
 2. Turn off all fans (part cooling, aux, chamber)
 3. Disable motors
 
-**Note:** Due to Bambu firmware limitations, heaters may not turn off immediately. They will naturally cool down over time.
+**Note:** Cooling behavior is firmware-controlled.
 
 ### Other Supported Macros
 
@@ -362,9 +392,8 @@ END_PRINT
 
 ### Temperature Control
 
-* **M140 (non-blocking bed heat)**: Does not work reliably when sent via MQTT. Use M190 instead or send commands from within G-code files.
-* **Turning off heaters**: `M104 S0` and `M140 S0` may not turn off heaters when sent via MQTT. Current workaround is to use the printer's touchscreen or wait for natural cooling. This appears to be a Bambu firmware limitation.
-* **M190/M109 (wait variants)**: These work reliably for setting temperatures.
+* The shim uses heater commands over MQTT (`M109`, `M190`, `M191`)
+* Firmware behavior can vary by printer and firmware revision
 
 ### FTPS File Operations
 
@@ -372,13 +401,14 @@ END_PRINT
 * Cache invalidation happens on uploads/deletes
 * Large file listings may be slow on first load
 * File operations require same credentials as MQTT (username: `bblp`, password: access code)
+* In mock mode (no `BAMBU_SERIAL`), file browsing uses local mock files and does not require FTPS
 
 ### General
 
 * **LAN-only mode recommended**: For full local control, set your printer to LAN-only mode in Bambu Studio/Handy app
 * **Firmware updates**: Bambu firmware updates may change MQTT/FTPS behavior
 * **No custom macros**: Only the built-in macros listed above are supported; custom user-defined macros cannot be added
-* **Print start**: Starting prints from uploaded files has limited implementation
+* **Print start**: Starting prints from uploaded files is supported, but behavior can vary by model/firmware and file format
 
 ## Troubleshooting
 
@@ -392,10 +422,11 @@ END_PRINT
 
 ### Temperature Commands Not Working
 
-1. **For heating**: Use M190 (bed) or M109 (extruder) instead of M140/M104
-2. **For turning off**: Use printer touchscreen to disable heaters, or wait for natural cooling
-3. Ensure printer is in LAN-only mode (not connected to cloud)
-4. Check that commands sent via console include proper formatting
+1. **For heating**: Use `M109`, `M190`, and `M191` or `SET_HEATER_TEMPERATURE`
+2. **For direct control**: Use `M109`, `M190`, and `M191` or `SET_HEATER_TEMPERATURE`
+3. **For turning off**: Set target to `0` and allow firmware-managed cooldown
+4. Ensure printer is in LAN-only mode (not connected to cloud)
+5. Check that commands sent via console include proper formatting
 
 ### Macros Not Working
 
@@ -411,9 +442,15 @@ END_PRINT
 3. Try refreshing file list to clear cache
 4. Ensure printer is not in cloud-only mode
 
+### G-codes Tab Missing In Mainsail
+
+1. Hard refresh Mainsail (`Ctrl+Shift+R` / `Cmd+Shift+R`)
+2. Confirm `/server/info` includes `registered_directories` with `gcodes`
+3. Confirm `/server/files/roots` returns both `gcodes` and `config`
+4. In mock mode, run without `.env` so FTPS is not queried
+
 ## Limitations / Roadmap
 
-* Fix heater off commands (investigating Bambu firmware behavior)
 * Better start print implementation
 * Full G-code console with command history
 * User-defined custom macros

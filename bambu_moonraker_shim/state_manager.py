@@ -1,12 +1,15 @@
 import time
 import uuid
 from typing import Dict, Any, List, Optional
+from bambu_moonraker_shim.config import model_supports_chamber_temperature
 
 class StateManager:
     def __init__(self):
+        self._has_chamber_temperature = model_supports_chamber_temperature()
         self._state: Dict[str, Any] = {
-            "extruder": {"temperature": 0.0, "target": 0.0, "power": 0.0, "pressure_advance": 0.0, "smooth_time": 0.0},
+            "extruder": {"temperature": 0.0, "target": 0.0, "power": 0.0, "pressure_advance": 0.0, "smooth_time": 0.0, "can_extrude": False},
             "heater_bed": {"temperature": 0.0, "target": 0.0, "power": 0.0},
+            "heater_chamber": {"temperature": 0.0, "target": 0.0, "power": 0.0},
             "fan": {"speed": 0.0},
             "fan_generic aux": {"speed": 0.0},
             "fan_generic chamber": {"speed": 0.0},
@@ -15,8 +18,11 @@ class StateManager:
             "virtual_sdcard": {"progress": 0.0, "is_active": False, "file_position": 0},
             "display_status": {"progress": 0.0, "message": ""},
             "heaters": {
-                "available_heaters": ["extruder", "heater_bed"],
-                "available_sensors": ["extruder", "heater_bed"]
+                "available_heaters": ["extruder", "heater_bed", "heater_chamber"],
+                "available_sensors": ["extruder", "heater_bed", "heater_chamber"]
+            },
+            "gcode": {
+                "commands": {}
             },
             "print_stats": {
                 "state": "standby", # standby, printing, paused, complete, error, cancelling
@@ -49,6 +55,10 @@ class StateManager:
                     "heater_bed": {
                         "min_temp": 0,
                         "max_temp": 120
+                    },
+                    "heater_chamber": {
+                        "min_temp": 0,
+                        "max_temp": 70
                     },
                     "fan": {
                         "pin": "fan0"
@@ -88,6 +98,10 @@ class StateManager:
                     "heater_bed": {
                         "min_temp": "0",
                         "max_temp": "120"
+                    },
+                    "heater_chamber": {
+                        "min_temp": "0",
+                        "max_temp": "70"
                     },
                     "fan": {
                         "pin": "fan0"
@@ -130,8 +144,13 @@ class StateManager:
                 "state_message": "Printer is ready"
             }
         }
+        if not self._has_chamber_temperature:
+            self._disable_chamber_temperature_state()
+
         self._max_temp_samples = 600
         self._temperature_objects = {"extruder", "heater_bed"}
+        if self._has_chamber_temperature and "heater_chamber" in self._state:
+            self._temperature_objects.add("heater_chamber")
         self._temperature_history: Dict[str, Dict[str, List[float]]] = {}
         for sensor in self._temperature_objects:
             self._record_temperature_sample(sensor)
@@ -142,6 +161,23 @@ class StateManager:
         self._current_job_id: Optional[str] = None
         self._current_job_start: Optional[float] = None
         self._last_print_state: str = "standby"
+
+    def _disable_chamber_temperature_state(self):
+        self._state.pop("heater_chamber", None)
+
+        heaters = self._state.get("heaters")
+        if isinstance(heaters, dict):
+            for key in ("available_heaters", "available_sensors"):
+                values = heaters.get(key)
+                if isinstance(values, list):
+                    heaters[key] = [item for item in values if item != "heater_chamber"]
+
+        configfile = self._state.get("configfile")
+        if isinstance(configfile, dict):
+            for section_name in ("settings", "config"):
+                section = configfile.get(section_name)
+                if isinstance(section, dict):
+                    section.pop("heater_chamber", None)
 
     def get_state(self) -> Dict[str, Any]:
         return self._state

@@ -7,7 +7,7 @@ import os
 import tempfile
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, UploadFile, File
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from bambu_moonraker_shim.state_manager import state_manager
 from bambu_moonraker_shim.bambu_client import bambu_client
 from bambu_moonraker_shim.config import Config
@@ -17,6 +17,31 @@ from bambu_moonraker_shim.ftps_client import ftps_client
 from bambu_moonraker_shim.sqlite_manager import get_sqlite_manager
 
 router = APIRouter()
+
+_DEFAULT_DISK_USAGE = {
+    "total": 32 * 1024 * 1024 * 1024,
+    "used": 1 * 1024 * 1024 * 1024,
+    "free": 31 * 1024 * 1024 * 1024,
+}
+
+_GCODE_FILE_SUFFIXES = (".gcode", ".gcode.3mf", ".3mf")
+_CONFIG_THEME_FILES = {
+    "maintenance.json": "{}",
+}
+_EXCLUDED_GCODES_ROOT_DIRS = {
+    "logger",
+    "recorder",
+    "image",
+    "ipcam",
+    "timelapse",
+    "cache",
+    "language",
+    "model",
+    "corelogger",
+    "verify_job",
+    ".spotlight-v100",
+    ".fseventsd",
+}
 
 CONFIG_FILES = {
     "printer.cfg": "\n".join(
@@ -68,7 +93,16 @@ def _config_file_listing():
     for name, content in CONFIG_FILES.items():
         files.append(
             {
-                "path": f"config/{name}",
+                "path": name,
+                "size": len(content.encode("utf-8")),
+                "modified": now,
+                "permissions": "rw",
+            }
+        )
+    for name, content in _CONFIG_THEME_FILES.items():
+        files.append(
+            {
+                "path": f".theme/{name}",
                 "size": len(content.encode("utf-8")),
                 "modified": now,
                 "permissions": "rw",
@@ -77,27 +111,45 @@ def _config_file_listing():
     return files
 
 
-def _config_directory_listing():
+def _config_directory_listing(path: str = "config"):
     now = time.time()
+    dirs = []
     files = []
-    for name, content in CONFIG_FILES.items():
-        files.append(
+    if path == "config":
+        dirs.append(
             {
-                "filename": name,
+                "dirname": ".theme",
                 "modified": now,
-                "size": len(content.encode("utf-8")),
+                "size": 0,
                 "permissions": "rw",
-                "path": _join_moonraker_path("config", name),
+                "path": ".theme",
             }
         )
+        for name, content in CONFIG_FILES.items():
+            files.append(
+                {
+                    "filename": name,
+                    "modified": now,
+                    "size": len(content.encode("utf-8")),
+                    "permissions": "rw",
+                    "path": name,
+                }
+            )
+    elif path == "config/.theme":
+        for name, content in _CONFIG_THEME_FILES.items():
+            files.append(
+                {
+                    "filename": name,
+                    "modified": now,
+                    "size": len(content.encode("utf-8")),
+                    "permissions": "rw",
+                    "path": name,
+                }
+            )
     return {
-        "dirs": [],
+        "dirs": dirs,
         "files": files,
-        "disk_usage": {
-            "total": 32 * 1024 * 1024 * 1024,  # 32GB
-            "used": 1 * 1024 * 1024 * 1024,  # 1GB
-            "free": 31 * 1024 * 1024 * 1024,  # 31GB
-        },
+        "disk_usage": dict(_DEFAULT_DISK_USAGE),
         "root_info": {
             "name": "config",
             "permissions": "rw",
@@ -111,36 +163,62 @@ def _join_moonraker_path(root: str, name: str) -> str:
 
 
 def _mock_gcode_file() -> Dict[str, Any]:
+    _ensure_mock_file_exists()
+    mock_path = os.path.join(Config.GCODES_DIR, "mock_file.gcode")
+    stat_result = os.stat(mock_path)
     return {
         "name": "mock_file.gcode",
-        "size": 0,
-        "modified": time.time(),
+        "size": stat_result.st_size,
+        "modified": stat_result.st_mtime,
         "is_dir": False,
     }
+
+
+def _ensure_mock_file_exists():
+    os.makedirs(Config.GCODES_DIR, exist_ok=True)
+    mock_path = os.path.join(Config.GCODES_DIR, "mock_file.gcode")
+    if not os.path.exists(mock_path):
+        with open(mock_path, "w", encoding="utf-8") as fp:
+            fp.write("G28\nM104 T0 S200\nM140 S60\n")
+
+
+def _list_mock_local_files() -> List[Dict[str, Any]]:
+    _ensure_mock_file_exists()
+    files: List[Dict[str, Any]] = []
+    for entry in os.scandir(Config.GCODES_DIR):
+        if not entry.is_file():
+            continue
+        stat_result = entry.stat()
+        files.append(
+            {
+                "name": entry.name,
+                "size": stat_result.st_size,
+                "modified": stat_result.st_mtime,
+                "is_dir": False,
+            }
+        )
+    files.sort(key=lambda item: item["name"].lower())
+    return files
 
 
 def _mock_directory_listing(path: str) -> Dict[str, Any]:
     files = []
     if path == "gcodes":
-        mock_file = _mock_gcode_file()
-        files.append(
-            {
-                "filename": mock_file["name"],
-                "modified": mock_file["modified"],
-                "size": mock_file["size"],
-                "permissions": "rw",
-                "path": _join_moonraker_path(path, mock_file["name"]),
-            }
-        )
+        for mock_file in _list_mock_local_files():
+            files.append(
+                {
+                    "filename": mock_file["name"],
+                    "modified": mock_file["modified"],
+                    "size": mock_file["size"],
+                    "permissions": "rw",
+                    "path": _directory_entry_path(path, mock_file["name"]),
+                }
+            )
 
     return {
         "dirs": [],
         "files": files,
-        "disk_usage": {
-            "total": 32 * 1024 * 1024 * 1024,  # 32GB
-            "used": 1 * 1024 * 1024 * 1024,  # 1GB
-            "free": 31 * 1024 * 1024 * 1024,  # 31GB
-        },
+        "disk_usage": dict(_DEFAULT_DISK_USAGE),
         "root_info": {
             "name": "gcodes",
             "permissions": "rw",
@@ -157,35 +235,183 @@ def _build_file_list(root: str) -> List[Dict[str, Any]]:
         return []
 
     if not Config.BAMBU_SERIAL:
-        mock_file = _mock_gcode_file()
-        return [
-            {
-                "path": _join_moonraker_path("gcodes", mock_file["name"]),
-                "size": mock_file["size"],
-                "modified": mock_file["modified"],
-                "permissions": "rw",
-            }
-        ]
+        files = []
+        for mock_file in _list_mock_local_files():
+            files.append(
+                {
+                    "path": mock_file["name"],
+                    "size": mock_file["size"],
+                    "modified": mock_file["modified"],
+                    "permissions": "rw",
+                }
+            )
+        return files
 
     # List files from printer via FTPS
     remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
 
     # Filter to only show gcode files (not directories)
-    # Mainsail expects a flat list with "path" starting with "gcodes/"
+    # server.files.list returns paths relative to the selected root.
     files = []
     for f in remote_files:
+        if "/" in f["name"]:
+            continue
         if not f["is_dir"]:
             # Filter by extension if desired
             name = f["name"]
-            if name.endswith((".gcode", ".gcode.3mf", ".3mf")):
+            if name.lower().endswith(_GCODE_FILE_SUFFIXES):
+                display_name = _display_filename(name)
                 files.append({
-                    "path": _join_moonraker_path("gcodes", name),
+                    "path": display_name,
                     "size": f["size"],
                     "modified": f["modified"],
                     "permissions": "rw",
                 })
 
     return files
+
+
+def _file_roots_payload() -> List[Dict[str, str]]:
+    return [
+        {
+            "name": "gcodes",
+            "path": Config.GCODES_DIR or "/tmp/gcodes",
+            "permissions": "rw",
+        },
+        {
+            "name": "config",
+            "path": "/app/config",
+            "permissions": "rw",
+        },
+    ]
+
+
+def _server_info_payload(include_history: bool = True) -> Dict[str, Any]:
+    components = [
+        "printer",
+        "websocket",
+        "database",
+        "file_manager",
+        "webcams",
+    ]
+    if include_history:
+        components.extend(["history", "job_queue"])
+
+    return {
+        "state": "ready",
+        "state_message": "Printer is ready",
+        "klippy_connected": True,
+        "klippy_state": "ready",
+        "components": components,
+        "registered_directories": ["gcodes", "config"],
+        "failed_components": [],
+        "warnings": [],
+        "version": "v0.0.1-bambu-shim",
+        "api_version": [1, 0, 0],
+    }
+
+
+def _get_disk_usage(root: str) -> Dict[str, int]:
+    if root == "config" or not Config.BAMBU_SERIAL:
+        return dict(_DEFAULT_DISK_USAGE)
+    try:
+        return ftps_client.get_storage_info()
+    except Exception as exc:
+        print(f"Disk usage lookup failed: {exc}")
+        return dict(_DEFAULT_DISK_USAGE)
+
+
+def _include_gcodes_directory_entry(path: str, name: str) -> bool:
+    if path != "gcodes":
+        return True
+    lower_name = name.lower()
+    if lower_name.startswith("."):
+        return False
+    return lower_name not in _EXCLUDED_GCODES_ROOT_DIRS
+
+
+def _include_gcodes_file_entry(path: str, name: str) -> bool:
+    if path != "gcodes":
+        return True
+    return name.lower().endswith(_GCODE_FILE_SUFFIXES)
+
+
+def _is_root_direct_child(entry: Dict[str, Any]) -> bool:
+    raw_path = str(entry.get("path") or entry.get("name") or "").strip()
+    if not raw_path:
+        return False
+    normalized = raw_path.lstrip("/")
+    if normalized.startswith("gcodes/"):
+        normalized = normalized[7:]
+    return "/" not in normalized
+
+
+def _directory_entry_path(path: str, name: str) -> str:
+    if path.startswith("gcodes/"):
+        subdir = path[7:].strip("/")
+        return f"{subdir}/{name}".strip("/")
+    if path.startswith("config/"):
+        subdir = path[7:].strip("/")
+        return f"{subdir}/{name}".strip("/")
+    return name
+
+
+def _cache_has_non_root_entries(entries: Optional[List[Dict[str, Any]]]) -> bool:
+    if not entries:
+        return False
+    return any(not _is_root_direct_child(entry) for entry in entries)
+
+
+def _display_filename(name: str) -> str:
+    lower_name = name.lower()
+    if lower_name.endswith(".gcode.3mf"):
+        # Mainsail's file browser expects canonical gcode-like filenames.
+        return name[:-4]
+    return name
+
+
+def _cached_file_exists(name: str) -> bool:
+    sqlite_manager = get_sqlite_manager()
+    cached = sqlite_manager.get_cached_files(max_age=300) or []
+    target = name.lower()
+    for entry in cached:
+        if entry.get("is_dir"):
+            continue
+        if str(entry.get("name", "")).lower() == target:
+            return True
+    return False
+
+
+def _m220_percent_to_mode(percent: float) -> int:
+    # Bambu fixed speed presets: 1=silent (50), 2=standard (100), 3=sport (124), 4=ludicrous (166).
+    presets = {1: 50.0, 2: 100.0, 3: 124.0, 4: 166.0}
+    return min(presets, key=lambda mode: abs(percent - presets[mode]))
+
+
+def _extract_skip_object_ids(params: Dict[str, str]) -> List[int]:
+    ids: List[int] = []
+    for key in ("OBJECT", "OBJ", "ID"):
+        value = params.get(key)
+        if value is None:
+            continue
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            pass
+    name_value = params.get("NAME")
+    if name_value:
+        digits = "".join(ch for ch in name_value if ch.isdigit())
+        if digits:
+            try:
+                ids.append(int(digits))
+            except (TypeError, ValueError):
+                pass
+    # Preserve order while deduplicating.
+    deduped: List[int] = []
+    for object_id in ids:
+        if object_id not in deduped:
+            deduped.append(object_id)
+    return deduped
 
 
 @router.get("/access/oneshot_token")
@@ -226,6 +452,7 @@ def _is_macro_command(command: str) -> bool:
         "LOAD_FILAMENT",
         "UNLOAD_FILAMENT",
         "BED_MESH_CALIBRATE",
+        "EXCLUDE_OBJECT",
     }
     if first_word in known_macros:
         return True
@@ -260,12 +487,21 @@ def _parse_macro_param(
 
 def _normalize_filename(filename: str) -> str:
     if filename.startswith("gcodes/"):
-        return filename[7:]
-    return filename
+        filename = filename[7:]
+    normalized = filename.lstrip("/")
+    if (
+        Config.BAMBU_SERIAL
+        and normalized.lower().endswith(".gcode")
+        and not normalized.lower().endswith(".gcode.3mf")
+    ):
+        candidate = f"{normalized}.3mf"
+        if _cached_file_exists(candidate):
+            return candidate
+    return normalized
 
 
 async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, Any]:
-    if not bambu_client.connected:
+    if not bambu_client.connected and Config.BAMBU_SERIAL:
         return {"error": "Printer not connected"}
 
     if macro_name in ("PRINT_START", "START_PRINT"):
@@ -280,42 +516,40 @@ async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, An
         chamber_temp, error = _parse_macro_param(params, ["CHAMBER"])
         if error:
             return {"error": error}
-        if chamber_temp is not None:
-            print("Warning: CHAMBER temperature requested but not supported.")
 
         await bambu_client.send_gcode_line("G28 \n")
 
         if bed_temp is not None:
-            result = await bambu_client.set_bed_temp(bed_temp, wait=False)
+            result = await bambu_client.set_bed_temp(bed_temp)
             if "error" in result:
                 return result
             await state_manager.update_state({"heater_bed": {"target": bed_temp}})
         if hotend_temp is not None:
-            result = await bambu_client.set_nozzle_temp(hotend_temp, wait=False)
+            result = await bambu_client.set_nozzle_temp(hotend_temp)
             if "error" in result:
                 return result
             await state_manager.update_state({"extruder": {"target": hotend_temp}})
-
-        if bed_temp and bed_temp > 0:
-            result = await bambu_client.set_bed_temp(bed_temp, wait=True)
+        if chamber_temp is not None:
+            result = await bambu_client.set_chamber_temp(chamber_temp)
             if "error" in result:
                 return result
-        if hotend_temp and hotend_temp > 0:
-            result = await bambu_client.set_nozzle_temp(hotend_temp, wait=True)
-            if "error" in result:
-                return result
+            await state_manager.update_state({"heater_chamber": {"target": chamber_temp}})
 
         return {"result": "ok", "action": "print_start"}
 
     if macro_name in ("PRINT_END", "END_PRINT"):
-        result = await bambu_client.set_nozzle_temp(0, wait=False)
+        result = await bambu_client.set_nozzle_temp(0)
         if "error" in result:
             return result
         await state_manager.update_state({"extruder": {"target": 0}})
-        result = await bambu_client.set_bed_temp(0, wait=False)
+        result = await bambu_client.set_bed_temp(0)
         if "error" in result:
             return result
         await state_manager.update_state({"heater_bed": {"target": 0}})
+        result = await bambu_client.set_chamber_temp(0)
+        if "error" in result:
+            return result
+        await state_manager.update_state({"heater_chamber": {"target": 0}})
 
         await bambu_client.send_gcode_line("M106 P1 S0 \n")
         await bambu_client.send_gcode_line("M106 P2 S0 \n")
@@ -323,14 +557,18 @@ async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, An
         return {"result": "ok", "action": "print_end"}
 
     if macro_name in ("HEATERS_OFF", "TURN_OFF_HEATERS"):
-        result = await bambu_client.set_nozzle_temp(0, wait=True)
+        result = await bambu_client.set_nozzle_temp(0)
         if "error" in result:
             return result
         await state_manager.update_state({"extruder": {"target": 0}})
-        result = await bambu_client.set_bed_temp(0, wait=True)
+        result = await bambu_client.set_bed_temp(0)
         if "error" in result:
             return result
         await state_manager.update_state({"heater_bed": {"target": 0}})
+        result = await bambu_client.set_chamber_temp(0)
+        if "error" in result:
+            return result
+        await state_manager.update_state({"heater_chamber": {"target": 0}})
         return {"result": "ok", "action": "heaters_off"}
 
     if macro_name == "PAUSE":
@@ -349,9 +587,49 @@ async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, An
         print("BED_MESH_CALIBRATE requested; Bambu handles leveling automatically.")
         return {"result": "ok", "action": "bed_mesh_calibrate"}
 
-    if macro_name in ("LOAD_FILAMENT", "UNLOAD_FILAMENT"):
-        print(f"{macro_name} requested; no Bambu macro translation available.")
-        return {"result": "ok", "action": macro_name.lower()}
+    if macro_name == "LOAD_FILAMENT":
+        has_explicit_ams_params = any(
+            key in params for key in ("TRAY_ID", "TRAY", "AMS_ID", "SLOT_ID", "SLOT")
+        )
+        if has_explicit_ams_params:
+            tray = params.get("TRAY_ID") or params.get("TRAY") or params.get("SLOT") or "0"
+            ams_id = params.get("AMS_ID") or "0"
+            slot_id = params.get("SLOT_ID") or params.get("SLOT") or "0"
+            try:
+                tray_id = int(tray)
+                ams_index = int(ams_id)
+                slot_index = int(slot_id)
+            except (TypeError, ValueError):
+                return {"error": "LOAD_FILAMENT expects numeric TRAY_ID/AMS_ID/SLOT_ID"}
+            result = await bambu_client.ams_load_filament(
+                tray_id=tray_id,
+                ams_id=ams_index,
+                slot_id=slot_index,
+            )
+        else:
+            result = await bambu_client.load_filament()
+        if "error" in result:
+            return result
+        return {"result": "ok", "action": "load_filament"}
+
+    if macro_name == "UNLOAD_FILAMENT":
+        has_explicit_ams_params = any(key in params for key in ("AMS", "AMS_ID", "SLOT_ID", "TRAY_ID"))
+        if has_explicit_ams_params:
+            result = await bambu_client.ams_unload_filament()
+        else:
+            result = await bambu_client.unload_filament()
+        if "error" in result:
+            return result
+        return {"result": "ok", "action": "unload_filament"}
+
+    if macro_name == "EXCLUDE_OBJECT":
+        object_ids = _extract_skip_object_ids(params)
+        if not object_ids:
+            return {"error": "EXCLUDE_OBJECT requires OBJECT, ID, or NAME with digits"}
+        result = await bambu_client.skip_objects(object_ids)
+        if "error" in result:
+            return result
+        return {"result": "ok", "action": "exclude_object", "objects": object_ids}
 
     return {"error": f"Unsupported macro: {macro_name}"}
 
@@ -383,21 +661,7 @@ def flatten_to_nested(flat_dict: dict) -> dict:
 
 @router.get("/server/info")
 async def server_info():
-    return success_response(
-        {
-            "state": "ready",
-            "klippy_state": "ready",
-            "components": [
-                "printer",
-                "websocket",
-                "database",
-                "file_manager",
-                "webcams",
-            ],
-            "version": "v0.0.1-bambu-shim",
-            "api_version": [1, 0, 0],
-        }
-    )
+    return success_response(_server_info_payload(include_history=True))
 
 
 @router.get("/printer/info")
@@ -460,12 +724,17 @@ async def objects_query(request: Request):
 @router.get("/server/files/list")
 async def file_list(root: str = "gcodes"):
     try:
-        files = _build_file_list(root)
+        files = await asyncio.to_thread(_build_file_list, root)
         return success_response(files)
     except Exception as e:
         print(f"Error listing files: {e}")
         # Return empty list on error rather than failing
         return success_response([])
+
+
+@router.get("/server/files/roots")
+async def file_roots():
+    return success_response(_file_roots_payload())
 
 
 @router.get("/server/files/directory")
@@ -476,11 +745,11 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
     """
     sqlite_manager = get_sqlite_manager()
 
-    if path == "config":
-        return success_response(_config_directory_listing())
+    if path == "config" or path == "config/.theme":
+        return _config_directory_listing(path)
 
     if not Config.BAMBU_SERIAL and path == "gcodes":
-        return success_response(_mock_directory_listing(path))
+        return _mock_directory_listing(path)
     
     # Determine actua FTPS path to check
     ftps_path = Config.BAMBU_FTPS_UPLOADS_DIR
@@ -494,14 +763,17 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
     cached_files = None
     if path == "gcodes":
             cached_files = sqlite_manager.get_cached_files(max_age=300)
+            if _cache_has_non_root_entries(cached_files):
+                cached_files = None
     
     if cached_files is None:
         # Cache miss - fetch from FTPS
         print(f"Fetching files from FTPS for path: {ftps_path} (requested: {path})")
         try:
-            remote_files = ftps_client.list_files(ftps_path)
+            remote_files = await asyncio.to_thread(ftps_client.list_files, ftps_path)
             # Only cache the root listing for now
             if path == "gcodes":
+                sqlite_manager.clear_file_cache()
                 sqlite_manager.cache_files(remote_files)
             cached_files = remote_files
         except Exception as e:
@@ -513,31 +785,34 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
     files = []
     
     for f in cached_files:
+        if path == "gcodes" and not _is_root_direct_child(f):
+            continue
         if f["is_dir"]:
+            if not _include_gcodes_directory_entry(path, f["name"]):
+                continue
             dirs.append({
                 "dirname": f["name"],
                 "modified": f["modified"],
                 "size": f["size"],
                 "permissions": "rw",
-                "path": _join_moonraker_path(path, f["name"]),
+                "path": _directory_entry_path(path, f["name"]),
             })
         else:
+            if not _include_gcodes_file_entry(path, f["name"]):
+                continue
+            display_name = _display_filename(f["name"])
             files.append({
-                "filename": f["name"],
+                "filename": display_name,
                 "modified": f["modified"],
                 "size": f["size"],
                 "permissions": "rw",
-                "path": _join_moonraker_path(path, f["name"]),
+                "path": _directory_entry_path(path, display_name),
             })
     
     result = {
         "dirs": dirs,
         "files": files,
-        "disk_usage": {
-            "total": 32 * 1024 * 1024 * 1024, # 32GB
-            "used": 1 * 1024 * 1024 * 1024,   # 1GB
-            "free": 31 * 1024 * 1024 * 1024   # 31GB
-        },
+        "disk_usage": _get_disk_usage("gcodes"),
         "root_info": {
             "name": "gcodes",
             "permissions": "rw",
@@ -556,6 +831,34 @@ async def file_upload(
     plate: int = 1,
 ):
     try:
+        if not Config.BAMBU_SERIAL:
+            _ensure_mock_file_exists()
+            target_name = file.filename or "upload.gcode"
+            target_path = os.path.join(Config.GCODES_DIR, os.path.basename(target_name))
+            content = await file.read()
+            with open(target_path, "wb") as fp:
+                fp.write(content)
+
+            print_started = False
+            if print:
+                result = await bambu_client.start_print(
+                    filename=os.path.basename(target_path),
+                    plate_number=plate,
+                    bed_leveling=True,
+                )
+                print_started = "error" not in result
+
+            return success_response(
+                {
+                    "item": {
+                        "path": f"gcodes/{os.path.basename(target_path)}",
+                        "size": len(content),
+                        "modified": time.time(),
+                    },
+                    "print_started": print_started,
+                }
+            )
+
         # Save uploaded file to a temp location first
         suffix = os.path.splitext(file.filename or "")[1] or ".gcode"
         temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
@@ -614,7 +917,15 @@ async def file_upload(
 async def file_delete(filename: str):
     """Delete a file from the printer via FTPS."""
     try:
-        ftps_client.delete_file(filename)
+        if not Config.BAMBU_SERIAL:
+            local_name = os.path.basename(filename)
+            local_path = os.path.join(Config.GCODES_DIR, local_name)
+            if os.path.exists(local_path):
+                os.unlink(local_path)
+            return success_response("ok")
+
+        target_name = _normalize_filename(filename)
+        ftps_client.delete_file(target_name)
         
         # Invalidate file cache so next list is fresh
         sqlite_manager = get_sqlite_manager()
@@ -628,17 +939,61 @@ async def file_delete(filename: str):
 
 @router.get("/server/files/{root}/{path:path}")
 async def file_download(root: str, path: str):
-    # Mocking theme files to avoid 404s for Mainsail
-    if root == "config" and ".theme" in path:
-        # Return empty JSON for theme files to satisfy Mainsail
-        return success_response({})
     if root == "config":
+        if path.startswith(".theme/"):
+            theme_name = path.split("/", 1)[1]
+            content = _CONFIG_THEME_FILES.get(theme_name)
+            if content is not None:
+                return Response(content=content, media_type="application/json")
         content = CONFIG_FILES.get(path)
         if content is not None:
             return PlainTextResponse(content)
+    if root == "gcodes":
+        if not Config.BAMBU_SERIAL:
+            local_name = os.path.basename(path)
+            local_path = os.path.join(Config.GCODES_DIR, local_name)
+            if not os.path.exists(local_path):
+                return error_response(404, "File not found")
+            with open(local_path, "rb") as fp:
+                payload = fp.read()
+            return Response(
+                content=payload,
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f'attachment; filename="{local_name}"'},
+            )
+        try:
+            target_path = _normalize_filename(path)
+            payload = await asyncio.to_thread(ftps_client.download_file, target_path)
+        except FileNotFoundError:
+            return error_response(404, "File not found")
+        except Exception as exc:
+            print(f"Download error ({path}): {exc}")
+            return error_response(500, "File download failed")
+        return Response(
+            content=payload,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{os.path.basename(path)}"'},
+        )
 
     # Generic 404 for now unless checked against real files
     return error_response(404, "File not found")
+
+
+@router.get("/server/files/metadata")
+async def file_metadata(filename: str):
+    return success_response({
+        "filename": filename,
+        "size": 1234,
+        "modified": time.time(),
+        "slicer": "BambuStudio",
+        "slicer_version": "unknown",
+        "layer_height": 0.2,
+        "first_layer_height": 0.2,
+        "object_height": 10.0,
+        "filament_total": 1000.0,
+        "estimated_time": 3600,
+        "thumbnails": [],
+    })
 
 
 @router.get("/server/database/item")
@@ -696,11 +1051,30 @@ async def print_start(request: Request):
             return error_response(400, "Filename required")
         filename = _normalize_filename(filename)
         plate = body.get("plate", 1)
+        use_ams = bool(body.get("use_ams", False))
+        bed_leveling = bool(body.get("bed_leveling", body.get("auto_bed_leveling", True)))
+        flow_calibration = bool(body.get("flow_calibration", body.get("flow_cali", False)))
+        timelapse = bool(body.get("timelapse", False))
+        vibration_cali = bool(body.get("vibration_cali", True))
+        layer_inspect = bool(body.get("layer_inspect", False))
+        cfg = str(body.get("cfg", ""))
+        extrude_cali_flag = bool(body.get("extrude_cali_flag", False))
+        ams_mapping = body.get("ams_mapping")
+        ams_mapping2 = body.get("ams_mapping2")
         print(f"Requested start print: {filename}")
         result = await bambu_client.start_print(
             filename=filename,
             plate_number=plate,
-            bed_leveling=True,
+            use_ams=use_ams,
+            bed_leveling=bed_leveling,
+            flow_calibration=flow_calibration,
+            timelapse=timelapse,
+            vibration_cali=vibration_cali,
+            layer_inspect=layer_inspect,
+            cfg=cfg,
+            extrude_cali_flag=extrude_cali_flag,
+            ams_mapping=ams_mapping,
+            ams_mapping2=ams_mapping2,
         )
         if "error" in result:
             return error_response(500, result["error"])
@@ -742,7 +1116,7 @@ class ConnectionManager:
     async def _keepalive_loop(self):
         """Sends periodic heartbeats to all clients to prevent disconnects."""
         while True:
-            await asyncio.sleep(20)  # 20s interval
+            await asyncio.sleep(2)  # 2s interval to beat Mainsail's 10s watchdog
             if self.active_connections:
                 # Minimal heartbeat that Mainsail accepts/ignores but keeps socket alive
                 # notify_proc_stat_update is standard Moonraker
@@ -766,6 +1140,7 @@ class ConnectionManager:
                 await self.broadcast(msg)
 
     async def connect(self, websocket: WebSocket):
+        self.start()
         await websocket.accept()
         self.active_connections.append(websocket)
         # Notify readiness immediately
@@ -832,21 +1207,7 @@ async def handle_jsonrpc(
     response = {"jsonrpc": "2.0", "id": req_id}
 
     if method == "server.info":
-        response["result"] = {
-            "state": "ready",
-            "klippy_state": "ready",
-            "components": [
-                "printer",
-                "websocket",
-                "database",
-                "file_manager",
-                "webcams",
-                "history",
-                "job_queue",
-            ],
-            "version": "v0.0.1-bambu-shim",
-            "api_version": [1, 0, 0],
-        }
+        response["result"] = _server_info_payload(include_history=True)
     elif method == "printer.objects.list":
         keys = list(state_manager.get_state().keys())
         response["result"] = {"objects": keys}
@@ -1091,6 +1452,7 @@ async def handle_jsonrpc(
         # Mainsail functionality often depends on this returning successfully
         # We split by newlines and send each as a separate command
         lines = script.split("\n")
+        handled_heater_targets: set[tuple[str, int]] = set()
         for line in lines:
             line = line.strip()
             if not line:
@@ -1161,8 +1523,8 @@ async def handle_jsonrpc(
                 except Exception as e:
                     print(f"Error parsing SET_FAN_SPEED: {e}")
 
-            # Intercept heater commands (M104/M109/M140/M190)
-            if line.upper().startswith(("M104", "M109", "M140", "M190")):
+            # Intercept heater commands (M104/M109/M140/M190/M141/M191).
+            if line.upper().startswith(("M104", "M109", "M140", "M190", "M141", "M191")):
                 try:
                     parts = line.upper().split()
                     cmd = parts[0]
@@ -1180,23 +1542,66 @@ async def handle_jsonrpc(
                         return response
 
                     if cmd in ("M104", "M109"):
-                        result = await bambu_client.set_nozzle_temp(temp, wait=(cmd == "M109"))
+                        heater_object = "extruder"
                     elif cmd in ("M140", "M190"):
-                        result = await bambu_client.set_bed_temp(temp, wait=(cmd == "M190"))
+                        heater_object = "heater_bed"
+                    elif cmd in ("M141", "M191"):
+                        heater_object = "heater_chamber"
+                    else:
+                        heater_object = ""
+
+                    dedupe_key = (heater_object, int(round(temp)))
+                    if dedupe_key in handled_heater_targets:
+                        print(f"Skipping duplicate heater command in script: {line}")
+                        continue
+
+                    if cmd in ("M104", "M109"):
+                        result = await bambu_client.set_nozzle_temp(temp)
+                    elif cmd in ("M140", "M190"):
+                        result = await bambu_client.set_bed_temp(temp)
+                    elif cmd in ("M141", "M191"):
+                        result = await bambu_client.set_chamber_temp(temp)
                     else:
                         result = {"error": f"Unsupported heater command: {cmd}"}
 
                     if "error" in result:
                         response["error"] = {"code": 400, "message": result["error"]}
                         return response
+                    handled_heater_targets.add(dedupe_key)
                     if cmd in ("M104", "M109"):
                         await state_manager.update_state({"extruder": {"target": temp}})
                     elif cmd in ("M140", "M190"):
                         await state_manager.update_state({"heater_bed": {"target": temp}})
+                    elif cmd in ("M141", "M191"):
+                        await state_manager.update_state({"heater_chamber": {"target": temp}})
 
                     continue
                 except Exception as e:
                     print(f"Heater parse error: {e}")
+
+            # Intercept print speed scaling and map to Bambu speed modes.
+            if line.upper().startswith("M220"):
+                try:
+                    parts = line.upper().split()
+                    speed_percent = None
+                    for part in parts[1:]:
+                        if part.startswith("S"):
+                            speed_percent = float(part[1:])
+                            break
+                    if speed_percent is None:
+                        response["error"] = {
+                            "code": 400,
+                            "message": f"Missing S parameter in print speed command: {line}",
+                        }
+                        return response
+                    mode = _m220_percent_to_mode(speed_percent)
+                    result = await bambu_client.set_print_speed(mode)
+                    if "error" in result:
+                        response["error"] = {"code": 400, "message": result["error"]}
+                        return response
+                    continue
+                except Exception as e:
+                    print(f"Print speed parse error: {e}")
 
             # Intercept SET_HEATER_TEMPERATURE for Moonraker compatibility
             # Format: SET_HEATER_TEMPERATURE HEATER=<name> TARGET=<value>
@@ -1205,16 +1610,12 @@ async def handle_jsonrpc(
                     parts = line.split()
                     heater_name = None
                     target = None
-                    wait = False
                     for part in parts:
                         upper = part.upper()
                         if upper.startswith("HEATER="):
                             heater_name = part.split("=", 1)[1]
                         elif upper.startswith("TARGET="):
                             target = float(part.split("=", 1)[1])
-                        elif upper.startswith("WAIT="):
-                            wait_value = part.split("=", 1)[1].strip().lower()
-                            wait = wait_value in {"1", "true", "yes", "on"}
 
                     if heater_name is None or target is None:
                         response["error"] = {
@@ -1223,20 +1624,40 @@ async def handle_jsonrpc(
                         }
                         return response
 
+                    heater_name = heater_name.lower()
                     if heater_name == "extruder":
-                        result = await bambu_client.set_nozzle_temp(target, wait=wait)
+                        heater_object = "extruder"
                     elif heater_name in ("heater_bed", "bed"):
-                        result = await bambu_client.set_bed_temp(target, wait=wait)
+                        heater_object = "heater_bed"
+                    elif heater_name in ("heater_chamber", "chamber"):
+                        heater_object = "heater_chamber"
+                    else:
+                        heater_object = ""
+
+                    dedupe_key = (heater_object, int(round(target)))
+                    if dedupe_key in handled_heater_targets:
+                        print(f"Skipping duplicate heater command in script: {line}")
+                        continue
+
+                    if heater_name == "extruder":
+                        result = await bambu_client.set_nozzle_temp(target)
+                    elif heater_name in ("heater_bed", "bed"):
+                        result = await bambu_client.set_bed_temp(target)
+                    elif heater_name in ("heater_chamber", "chamber"):
+                        result = await bambu_client.set_chamber_temp(target)
                     else:
                         result = {"error": f"Unknown heater: {heater_name}"}
 
                     if "error" in result:
                         response["error"] = {"code": 400, "message": result["error"]}
                         return response
+                    handled_heater_targets.add(dedupe_key)
                     if heater_name == "extruder":
                         await state_manager.update_state({"extruder": {"target": target}})
                     elif heater_name in ("heater_bed", "bed"):
                         await state_manager.update_state({"heater_bed": {"target": target}})
+                    elif heater_name in ("heater_chamber", "chamber"):
+                        await state_manager.update_state({"heater_chamber": {"target": target}})
                     continue
                 except Exception as e:
                     print(f"SET_HEATER_TEMPERATURE parse error: {e}")
@@ -1254,46 +1675,78 @@ async def handle_jsonrpc(
             return response
         filename = _normalize_filename(filename)
         plate = params.get("plate", 1)
+        use_ams = bool(params.get("use_ams", False))
+        bed_leveling = bool(params.get("bed_leveling", params.get("auto_bed_leveling", True)))
+        flow_calibration = bool(params.get("flow_calibration", params.get("flow_cali", False)))
+        timelapse = bool(params.get("timelapse", False))
+        vibration_cali = bool(params.get("vibration_cali", True))
+        layer_inspect = bool(params.get("layer_inspect", False))
+        cfg = str(params.get("cfg", ""))
+        extrude_cali_flag = bool(params.get("extrude_cali_flag", False))
+        ams_mapping = params.get("ams_mapping")
+        ams_mapping2 = params.get("ams_mapping2")
         result = await bambu_client.start_print(
             filename=filename,
             plate_number=plate,
-            bed_leveling=True,
+            use_ams=use_ams,
+            bed_leveling=bed_leveling,
+            flow_calibration=flow_calibration,
+            timelapse=timelapse,
+            vibration_cali=vibration_cali,
+            layer_inspect=layer_inspect,
+            cfg=cfg,
+            extrude_cali_flag=extrude_cali_flag,
+            ams_mapping=ams_mapping,
+            ams_mapping2=ams_mapping2,
         )
         if "error" in result:
             response["error"] = {"code": 500, "message": result["error"]}
         else:
             response["result"] = "ok"
 
+    elif method in ("printer.print.set_speed", "printer.print.speed"):
+        params = request.get("params", {})
+        mode = params.get("mode")
+        result = await bambu_client.set_print_speed(mode)
+        if "error" in result:
+            response["error"] = {"code": 400, "message": result["error"]}
+        else:
+            response["result"] = "ok"
+
+    elif method in ("printer.exclude_object", "printer.print.exclude_object"):
+        params = request.get("params", {})
+        object_ids = params.get("object_ids") or params.get("obj_list") or []
+        if not object_ids and "object_id" in params:
+            object_ids = [params.get("object_id")]
+        if not object_ids and "id" in params:
+            object_ids = [params.get("id")]
+        result = await bambu_client.skip_objects(object_ids)
+        if "error" in result:
+            response["error"] = {"code": 400, "message": result["error"]}
+        else:
+            response["result"] = "ok"
+
     elif method == "server.files.roots":
-        response["result"] = {
-            "roots": [
-                {
-                    "name": "gcodes",
-                    "path": "gcodes",
-                    "permissions": "rw"
-                },
-                {
-                    "name": "config",
-                    "path": "config",
-                    "permissions": "rw"
-                }
-            ]
-        }
+        response["result"] = _file_roots_payload()
 
     elif method == "server.files.list":
         params = request.get("params", {})
         root = params.get("root", "gcodes")
         try:
-            files = _build_file_list(root)
-            response["result"] = {"root": root, "files": files}
+            files = await asyncio.to_thread(_build_file_list, root)
+            response["result"] = files
         except Exception as e:
             print(f"Error listing files: {e}")
-            response["result"] = {"root": root, "files": []}
+            response["result"] = []
 
     elif method == "server.files.get_directory":
         # Get file listing with caching
         params = request.get("params", {})
         path = params.get("path", "gcodes")
+
+        if path == "config" or path == "config/.theme":
+            response["result"] = _config_directory_listing(path)
+            return response
 
         if not Config.BAMBU_SERIAL and path == "gcodes":
             response["result"] = _mock_directory_listing(path)
@@ -1318,14 +1771,17 @@ async def handle_jsonrpc(
         cached_files = None
         if path == "gcodes":
              cached_files = sqlite_manager.get_cached_files(max_age=300)
+             if _cache_has_non_root_entries(cached_files):
+                 cached_files = None
         
         if cached_files is None:
             # Cache miss - fetch from FTPS
             print(f"Fetching files from FTPS for path: {ftps_path} (requested: {path})")
             try:
-                remote_files = ftps_client.list_files(ftps_path)
+                remote_files = await asyncio.to_thread(ftps_client.list_files, ftps_path)
                 # Only cache the root listing for now to avoid complexity
                 if path == "gcodes":
+                    sqlite_manager.clear_file_cache()
                     sqlite_manager.cache_files(remote_files)
                 cached_files = remote_files
             except Exception as e:
@@ -1339,31 +1795,34 @@ async def handle_jsonrpc(
         files = []
         
         for f in cached_files:
+            if path == "gcodes" and not _is_root_direct_child(f):
+                continue
             if f["is_dir"]:
+                if not _include_gcodes_directory_entry(path, f["name"]):
+                    continue
                 dirs.append({
                     "dirname": f["name"],
                     "modified": f["modified"],
                     "size": f["size"],
                     "permissions": "rw",
-                    "path": _join_moonraker_path(path, f["name"]),
+                    "path": _directory_entry_path(path, f["name"]),
                 })
             else:
+                if not _include_gcodes_file_entry(path, f["name"]):
+                    continue
+                display_name = _display_filename(f["name"])
                 files.append({
-                    "filename": f["name"],
+                    "filename": display_name,
                     "modified": f["modified"],
                     "size": f["size"],
                     "permissions": "rw",
-                    "path": _join_moonraker_path(path, f["name"]),
+                    "path": _directory_entry_path(path, display_name),
                 })
         
         response["result"] = {
             "dirs": dirs,
             "files": files,
-            "disk_usage": {
-                "total": 32 * 1024 * 1024 * 1024, # 32GB Fake Total
-                "used": 1 * 1024 * 1024 * 1024,   # 1GB Fake Used
-                "free": 31 * 1024 * 1024 * 1024   # 31GB Fake Free
-            },
+            "disk_usage": _get_disk_usage("gcodes"),
             "root_info": {
                 "name": "gcodes", # Always the root name, even for subdirs
                 "permissions": "rw",
