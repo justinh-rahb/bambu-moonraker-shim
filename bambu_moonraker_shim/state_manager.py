@@ -31,6 +31,9 @@ class StateManager:
                 "total_duration": 0.0,
                 "filament_used": 0.0,
             },
+            "gcode_macro PAUSE": {},
+            "gcode_macro RESUME": {},
+            "gcode_macro CANCEL_PRINT": {},
             "toolhead": {
                 "position": [0.0, 0.0, 0.0],
                 "status": "Ready",
@@ -74,9 +77,9 @@ class StateManager:
                     },
                     "pause_resume": {},
                     "display_status": {},
-                    "gcode_macro pause": {},
-                    "gcode_macro resume": {},
-                    "gcode_macro cancel_print": {},
+                    "gcode_macro PAUSE": {},
+                    "gcode_macro RESUME": {},
+                    "gcode_macro CANCEL_PRINT": {},
                     "output_pin caselight": {
                          "pin": "gpio1",
                          "pwm": False,
@@ -117,9 +120,9 @@ class StateManager:
                     },
                     "pause_resume": {},
                     "display_status": {},
-                    "gcode_macro pause": {},
-                    "gcode_macro resume": {},
-                    "gcode_macro cancel_print": {}
+                    "gcode_macro PAUSE": {},
+                    "gcode_macro RESUME": {},
+                    "gcode_macro CANCEL_PRINT": {}
                 }
             },
             "virtual_sdcard": {

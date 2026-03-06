@@ -184,6 +184,8 @@ A Docker image is provided that bundles:
 
 * This shim
 * Mainsail UI
+* Fluidd UI
+* moonraker-cnc UI
 * Nginx reverse proxy
 
 ### Build
@@ -192,21 +194,38 @@ A Docker image is provided that bundles:
 docker build -t bambu-moonraker-shim .
 ```
 
+Optional pinning for deterministic UI assets:
+
+```bash
+docker build -t bambu-moonraker-shim \
+  --build-arg MAINSAIL_URL="https://github.com/mainsail-crew/mainsail/releases/download/v2.17.0/mainsail.zip" \
+  --build-arg MAINSAIL_SHA256="d010f4df25557d520ccdbb8e42fc381df2288e6a5c72d3838a5a2433c7a31d4e" \
+  --build-arg FLUIDD_URL="https://github.com/fluidd-core/fluidd/releases/download/v<fluidd-version>/fluidd.zip" \
+  --build-arg FLUIDD_SHA256="<fluidd-zip-sha256>" \
+  --build-arg CNC_UI_URL="https://github.com/justinh-rahb/moonraker-cnc/archive/56061199fb319d06fff9076f3895fd1e789d7587.zip" \
+  --build-arg CNC_UI_SHA256="<cnc-ui-zip-sha256>" \
+  .
+```
+
 ### Run
 
 ```bash
 docker run \
   --env-file .env \
   -p 8080:80 \
+  -p 8081:81 \
+  -p 8082:82 \
   -v "$PWD/bambu_shim.db:/app/bambu_shim.db" \
   -v "$PWD/moonraker.json:/app/moonraker.json" \
   bambu-moonraker-shim
 ```
 
-Access Mainsail at:
+Access UIs at:
 
 ```
-http://localhost:8080
+Mainsail: http://localhost:8080
+Fluidd:   http://localhost:8081
+CNC UI:   http://localhost:8082
 ```
 
 ### Networking Notes
@@ -230,6 +249,18 @@ Access Mainsail at:
 http://localhost
 ```
 
+Access Fluidd at:
+
+```
+http://localhost:81
+```
+
+Access moonraker-cnc UI at:
+
+```
+http://localhost:82
+```
+
 ### Persistent Data
 
 The bind mounts above persist runtime data across container restarts:
@@ -250,6 +281,8 @@ To run in mock mode (no `BAMBU_SERIAL` / no `.env`), start without `--env-file`:
 ```bash
 docker run \
   -p 8080:80 \
+  -p 8081:81 \
+  -p 8082:82 \
   -v "$PWD/bambu_shim.db:/app/bambu_shim.db" \
   -v "$PWD/moonraker.json:/app/moonraker.json" \
   bambu-moonraker-shim
