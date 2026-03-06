@@ -725,16 +725,16 @@ async def objects_query(request: Request):
 async def file_list(root: str = "gcodes"):
     try:
         files = await asyncio.to_thread(_build_file_list, root)
-        return files
+        return success_response(files)
     except Exception as e:
         print(f"Error listing files: {e}")
         # Return empty list on error rather than failing
-        return []
+        return success_response([])
 
 
 @router.get("/server/files/roots")
 async def file_roots():
-    return _file_roots_payload()
+    return success_response(_file_roots_payload())
 
 
 @router.get("/server/files/directory")
@@ -820,7 +820,7 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
         }
     }
     
-    return result
+    return success_response(result)
 
 
 @router.post("/server/files/upload")
@@ -981,7 +981,7 @@ async def file_download(root: str, path: str):
 
 @router.get("/server/files/metadata")
 async def file_metadata(filename: str):
-    return {
+    return success_response({
         "filename": filename,
         "size": 1234,
         "modified": time.time(),
@@ -993,7 +993,7 @@ async def file_metadata(filename: str):
         "filament_total": 1000.0,
         "estimated_time": 3600,
         "thumbnails": [],
-    }
+    })
 
 
 @router.get("/server/database/item")
@@ -1116,7 +1116,7 @@ class ConnectionManager:
     async def _keepalive_loop(self):
         """Sends periodic heartbeats to all clients to prevent disconnects."""
         while True:
-            await asyncio.sleep(20)  # 20s interval
+            await asyncio.sleep(2)  # 2s interval to beat Mainsail's 10s watchdog
             if self.active_connections:
                 # Minimal heartbeat that Mainsail accepts/ignores but keeps socket alive
                 # notify_proc_stat_update is standard Moonraker
@@ -1140,6 +1140,7 @@ class ConnectionManager:
                 await self.broadcast(msg)
 
     async def connect(self, websocket: WebSocket):
+        self.start()
         await websocket.accept()
         self.active_connections.append(websocket)
         # Notify readiness immediately

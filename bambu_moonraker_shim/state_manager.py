@@ -7,7 +7,7 @@ class StateManager:
     def __init__(self):
         self._has_chamber_temperature = model_supports_chamber_temperature()
         self._state: Dict[str, Any] = {
-            "extruder": {"temperature": 0.0, "target": 0.0, "power": 0.0, "pressure_advance": 0.0, "smooth_time": 0.0},
+            "extruder": {"temperature": 0.0, "target": 0.0, "power": 0.0, "pressure_advance": 0.0, "smooth_time": 0.0, "can_extrude": False},
             "heater_bed": {"temperature": 0.0, "target": 0.0, "power": 0.0},
             "heater_chamber": {"temperature": 0.0, "target": 0.0, "power": 0.0},
             "fan": {"speed": 0.0},

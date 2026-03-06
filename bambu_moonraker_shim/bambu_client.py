@@ -263,7 +263,7 @@ class BambuClient:
         print(f"Sending MQTT Command: {json.dumps(command_with_sequence)}")
         topic = f"device/{self.serial}/request"
         payload = json.dumps(command_with_sequence)
-        await self._mqtt_client.publish(topic, payload, qos=1)
+        await self._mqtt_client.publish(topic, payload, qos=0)
 
     # --- Actions ---
     
@@ -522,11 +522,11 @@ class BambuClient:
             return {"result": "ok", "mock": True}
 
         if heater == "extruder":
-            gcode = f"M104 T0 S{rounded}\n"
+            gcode = f"M104 T0 S{rounded}"
         elif heater == "bed":
-            gcode = f"M140 S{rounded}\n"
+            gcode = f"M140 S{rounded}"
         else:
-            gcode = f"M141 S{rounded}\n"
+            gcode = f"M141 S{rounded}"
         await self.send_gcode_line(gcode)
         await self._track_local_target(heater, target_value)
         return {"result": "ok"}

@@ -326,9 +326,10 @@ class BambuFTPSClient:
         if free is None and total is not None:
             free = max(total - used, 0)
         if total is None:
-            total = used
+            # Assume 32GB default for Bambu SD cards if not reported
+            total = max(32 * 1024 * 1024 * 1024, used)
         if free is None:
-            free = 0
+            free = max(total - used, 0)
 
         return {"total": int(total), "used": int(used), "free": int(free)}
 
