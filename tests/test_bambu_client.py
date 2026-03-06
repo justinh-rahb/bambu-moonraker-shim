@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -16,6 +17,7 @@ class BambuClientTests(unittest.IsolatedAsyncioTestCase):
 
         cmd = {"print": {"command": "pause"}}
         await client.publish_command(cmd)
+        await asyncio.sleep(0)
 
         client._mqtt_client.publish.assert_awaited_once()
         args, kwargs = client._mqtt_client.publish.await_args
@@ -25,8 +27,46 @@ class BambuClientTests(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(args[1])
         self.assertEqual(payload["print"]["command"], "pause")
         self.assertEqual(payload["print"]["sequence_id"], "1")
+        self.assertEqual(payload["user_id"], client.user_id)
 
-    async def test_send_temperature_command_uses_non_blocking_gcodes(self):
+    async def test_publish_command_retries_qos_0_after_qos_1_error(self):
+        client = BambuClient()
+        client.connected = True
+        client.serial = "SERIAL123"
+        client._mqtt_client = AsyncMock()
+        client._mqtt_client.publish.side_effect = [
+            Exception("Operation timed out"),
+            None,
+        ]
+
+        cmd = {"print": {"command": "pause"}}
+        await client.publish_command(cmd)
+        await asyncio.sleep(0)
+
+        self.assertEqual(client._mqtt_client.publish.await_count, 2)
+        first_call = client._mqtt_client.publish.await_args_list[0]
+        second_call = client._mqtt_client.publish.await_args_list[1]
+        self.assertEqual(first_call.kwargs["qos"], 1)
+        self.assertEqual(second_call.kwargs["qos"], 0)
+        self.assertTrue(client._prefer_qos0_for_print)
+
+    async def test_publish_command_uses_qos_0_after_compatibility_downgrade(self):
+        client = BambuClient()
+        client.connected = True
+        client.serial = "SERIAL123"
+        client._mqtt_client = AsyncMock()
+        client._prefer_qos0_for_print = True
+
+        cmd = {"print": {"command": "resume"}}
+        await client.publish_command(cmd)
+        await asyncio.sleep(0)
+
+        client._mqtt_client.publish.assert_awaited_once()
+        args, kwargs = client._mqtt_client.publish.await_args
+        self.assertEqual(args[0], "device/SERIAL123/request")
+        self.assertEqual(kwargs["qos"], 0)
+
+    async def test_send_temperature_command_uses_supported_heater_gcodes(self):
         client = BambuClient()
         client.connected = True
         client._mqtt_client = AsyncMock()
@@ -35,15 +75,37 @@ class BambuClientTests(unittest.IsolatedAsyncioTestCase):
 
         result = await client.set_nozzle_temp(220)
         self.assertEqual(result, {"result": "ok"})
-        client.send_gcode_line.assert_awaited_with("M104 T0 S220\n")
+        client.send_gcode_line.assert_awaited_with("M109 S220\n")
 
         result = await client.set_bed_temp(60)
         self.assertEqual(result, {"result": "ok"})
-        client.send_gcode_line.assert_awaited_with("M140 S60\n")
+        client.send_gcode_line.assert_awaited_with("M190 S60\n")
 
         result = await client.set_chamber_temp(45)
         self.assertEqual(result, {"result": "ok"})
-        client.send_gcode_line.assert_awaited_with("M141 S45\n")
+        client.send_gcode_line.assert_awaited_with("M191 S45\n")
+
+    async def test_extruder_zero_target_telemetry_logs_without_alternate_gcode(self):
+        client = BambuClient()
+        client.connected = True
+        client.send_gcode_line = AsyncMock()
+        client._track_local_target = AsyncMock()
+
+        updates_mock = AsyncMock()
+        with patch.object(state_manager, "update_state", updates_mock), patch("builtins.print") as print_mock:
+            result = await client.set_nozzle_temp(220)
+            self.assertEqual(result, {"result": "ok"})
+            await client._parse_telemetry({"nozzle_target_temper": 0})
+
+        self.assertEqual(client.send_gcode_line.await_args_list[0].args[0], "M109 S220\n")
+        self.assertEqual(client.send_gcode_line.await_count, 1)
+        self.assertTrue(
+            any(
+                "Telemetry reported extruder target as 0" in str(call.args[0])
+                for call in print_mock.call_args_list
+                if call.args
+            )
+        )
 
     async def test_non_ams_load_unload_commands(self):
         client = BambuClient()

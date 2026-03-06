@@ -12,16 +12,29 @@ class BambuClient:
         self.host = Config.BAMBU_HOST
         self.access_code = Config.BAMBU_ACCESS_CODE
         self.serial = Config.BAMBU_SERIAL
+        self.user_id = str(Config.BAMBU_USER_ID or "")
         self.connected = False
         self._mock_mode = False
         self._mqtt_client: Optional[aiomqtt.Client] = None
         self._sequence_id = 0
+        self._prefer_qos0_for_print = False
         self._local_targets: Dict[str, Dict[str, Any]] = {
             "extruder": {"target": None, "set_time": 0.0},
             "heater_bed": {"target": None, "set_time": 0.0},
             "heater_chamber": {"target": None, "set_time": 0.0},
         }
         self._local_target_max_age_seconds = 20 * 60
+        self._temperature_probe_window_seconds = 12.0
+        self._preferred_temp_variant_index: Dict[str, int] = {
+            "extruder": 0,
+            "bed": 0,
+            "chamber": 0,
+        }
+        self._pending_temp_commands: Dict[str, Dict[str, Any]] = {
+            "extruder": {"target": None, "set_time": 0.0, "variant_index": 0, "fallback_sent": False},
+            "bed": {"target": None, "set_time": 0.0, "variant_index": 0, "fallback_sent": False},
+            "chamber": {"target": None, "set_time": 0.0, "variant_index": 0, "fallback_sent": False},
+        }
         self._mock_target_nozzle = 0.0
         self._mock_current_nozzle = 20.0
         self._mock_target_bed = 0.0
@@ -88,6 +101,10 @@ class BambuClient:
             # Bambu payload structure is complex. We look for 'print' object usually
             if "print" in payload:
                 data = payload["print"]
+                if isinstance(data, dict):
+                    command_name = data.get("command")
+                    if command_name and command_name != "push_status":
+                        print(f"MQTT report message: {json.dumps(data)}")
                 await self._parse_telemetry(data)
                 
         except json.JSONDecodeError:
@@ -102,7 +119,9 @@ class BambuClient:
         if "nozzle_temper" in data:
             extruder_update["temperature"] = float(data.get("nozzle_temper", 0))
         if "nozzle_target_temper" in data:
-            extruder_update["target"] = float(data.get("nozzle_target_temper", 0))
+            reported_target = float(data.get("nozzle_target_temper", 0))
+            extruder_update["target"] = reported_target
+            await self._handle_temperature_target_report("extruder", reported_target)
             self._clear_local_target("extruder")
         else:
             local_target = self._get_local_target("extruder")
@@ -116,7 +135,9 @@ class BambuClient:
         if "bed_temper" in data:
             bed_update["temperature"] = float(data.get("bed_temper", 0))
         if "bed_target_temper" in data:
-            bed_update["target"] = float(data.get("bed_target_temper", 0))
+            reported_target = float(data.get("bed_target_temper", 0))
+            bed_update["target"] = reported_target
+            await self._handle_temperature_target_report("bed", reported_target)
             self._clear_local_target("heater_bed")
         else:
             local_target = self._get_local_target("heater_bed")
@@ -130,7 +151,9 @@ class BambuClient:
         if "chamber_temper" in data:
             chamber_update["temperature"] = float(data.get("chamber_temper", 0))
         if "chamber_target_temper" in data:
-            chamber_update["target"] = float(data.get("chamber_target_temper", 0))
+            reported_target = float(data.get("chamber_target_temper", 0))
+            chamber_update["target"] = reported_target
+            await self._handle_temperature_target_report("chamber", reported_target)
             self._clear_local_target("heater_chamber")
         else:
             local_target = self._get_local_target("heater_chamber")
@@ -217,6 +240,8 @@ class BambuClient:
             payload = command.get(top_key)
             if isinstance(payload, dict):
                 payload["sequence_id"] = sequence_id
+        if isinstance(command.get("print"), dict) and self.user_id:
+            command.setdefault("user_id", self.user_id)
         return command
 
     def _set_local_target(self, heater_object: str, target: float):
@@ -248,6 +273,73 @@ class BambuClient:
         self._set_local_target(object_name, target)
         await state_manager.update_state({object_name: {"target": float(target)}})
 
+    @staticmethod
+    def _temperature_gcode_variants(heater: str, target: int) -> List[str]:
+        # P1-series firmware accepts M109/M190 while often ignoring M104/M140.
+        if heater == "extruder":
+            return [f"M109 S{target}\n"]
+        if heater == "bed":
+            return [f"M190 S{target}\n"]
+        return [f"M191 S{target}\n"]
+
+    def _track_pending_temp_command(self, heater: str, target: float, variant_index: int):
+        self._pending_temp_commands[heater] = {
+            "target": float(target),
+            "set_time": time.time(),
+            "variant_index": int(variant_index),
+            "fallback_sent": False,
+        }
+
+    def _clear_pending_temp_command(self, heater: str):
+        self._pending_temp_commands[heater] = {
+            "target": None,
+            "set_time": 0.0,
+            "variant_index": 0,
+            "fallback_sent": False,
+        }
+
+    async def _handle_temperature_target_report(self, heater: str, reported_target: float):
+        pending = self._pending_temp_commands.get(heater)
+        if not pending:
+            return
+
+        expected_target = pending.get("target")
+        if expected_target is None:
+            return
+
+        age_seconds = time.time() - float(pending.get("set_time") or 0.0)
+        if age_seconds > self._temperature_probe_window_seconds:
+            self._clear_pending_temp_command(heater)
+            return
+
+        expected_value = float(expected_target)
+        if reported_target <= 0 and expected_value > 0:
+            print(
+                f"Telemetry reported {heater} target as 0 after command "
+                f"(expected {expected_value:.1f}, age={age_seconds:.1f}s)"
+            )
+            if heater == "extruder" and not bool(pending.get("fallback_sent")):
+                variants = self._temperature_gcode_variants("extruder", int(round(expected_value)))
+                current_variant = int(pending.get("variant_index") or 0)
+                fallback_variant = current_variant + 1
+                if fallback_variant < len(variants):
+                    fallback_gcode = variants[fallback_variant]
+                    print(
+                        "Retrying extruder target with fallback gcode format: "
+                        f"{fallback_gcode.strip()}"
+                    )
+                    pending["fallback_sent"] = True
+                    pending["variant_index"] = fallback_variant
+                    pending["set_time"] = time.time()
+                    self._preferred_temp_variant_index["extruder"] = fallback_variant
+                    await self.send_gcode_line(fallback_gcode)
+            return
+
+        if reported_target > 0:
+            self._preferred_temp_variant_index[heater] = int(pending.get("variant_index") or 0)
+
+        self._clear_pending_temp_command(heater)
+
     async def publish_command(self, command: Dict[str, Any]):
         """Sends a JSON command to the printer request topic."""
         if self._mock_mode:
@@ -263,7 +355,38 @@ class BambuClient:
         print(f"Sending MQTT Command: {json.dumps(command_with_sequence)}")
         topic = f"device/{self.serial}/request"
         payload = json.dumps(command_with_sequence)
-        await self._mqtt_client.publish(topic, payload, qos=0)
+        qos = self._select_publish_qos(command_with_sequence)
+        print(f"Publishing MQTT command with qos={qos}")
+        # Keep RPC handlers responsive; publish runs in the background.
+        asyncio.create_task(self._publish_background(topic, payload, qos))
+
+    def _select_publish_qos(self, command: Dict[str, Any]) -> int:
+        # System commands (ledctrl, etc.) are prone to delayed/missing PUBACKs.
+        if "system" in command:
+            return 0
+        if self._prefer_qos0_for_print:
+            return 0
+        # Print and gcode commands should use reliable delivery.
+        return 1
+
+    async def _publish_background(self, topic: str, payload: str, qos: int):
+        if not self._mqtt_client:
+            return
+        try:
+            await self._mqtt_client.publish(topic, payload, qos=qos)
+        except Exception as exc:
+            if qos == 1:
+                if not self._prefer_qos0_for_print:
+                    print("MQTT qos=1 appears unsupported/reliable on this printer; using qos=0 for print commands.")
+                self._prefer_qos0_for_print = True
+                print(f"MQTT publish error at qos=1, retrying with qos=0: {exc}")
+                try:
+                    await self._mqtt_client.publish(topic, payload, qos=0)
+                    return
+                except Exception as fallback_exc:
+                    print(f"MQTT fallback publish failed: {fallback_exc}")
+                    return
+            print(f"MQTT publish error: {exc}")
 
     # --- Actions ---
     
@@ -521,13 +644,13 @@ class BambuClient:
             await self._track_local_target(heater, target_value)
             return {"result": "ok", "mock": True}
 
-        if heater == "extruder":
-            gcode = f"M104 T0 S{rounded}"
-        elif heater == "bed":
-            gcode = f"M140 S{rounded}"
-        else:
-            gcode = f"M141 S{rounded}"
+        variants = self._temperature_gcode_variants(heater, rounded)
+        variant_index = int(self._preferred_temp_variant_index.get(heater, 0))
+        if variant_index < 0 or variant_index >= len(variants):
+            variant_index = 0
+        gcode = variants[variant_index]
         await self.send_gcode_line(gcode)
+        self._track_pending_temp_command(heater, target_value, variant_index)
         await self._track_local_target(heater, target_value)
         return {"result": "ok"}
 

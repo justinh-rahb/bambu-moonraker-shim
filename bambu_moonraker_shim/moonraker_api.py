@@ -1452,6 +1452,7 @@ async def handle_jsonrpc(
         # Mainsail functionality often depends on this returning successfully
         # We split by newlines and send each as a separate command
         lines = script.split("\n")
+        handled_heater_targets: set[tuple[str, int]] = set()
         for line in lines:
             line = line.strip()
             if not line:
@@ -1541,6 +1542,20 @@ async def handle_jsonrpc(
                         return response
 
                     if cmd in ("M104", "M109"):
+                        heater_object = "extruder"
+                    elif cmd in ("M140", "M190"):
+                        heater_object = "heater_bed"
+                    elif cmd in ("M141", "M191"):
+                        heater_object = "heater_chamber"
+                    else:
+                        heater_object = ""
+
+                    dedupe_key = (heater_object, int(round(temp)))
+                    if dedupe_key in handled_heater_targets:
+                        print(f"Skipping duplicate heater command in script: {line}")
+                        continue
+
+                    if cmd in ("M104", "M109"):
                         result = await bambu_client.set_nozzle_temp(temp)
                     elif cmd in ("M140", "M190"):
                         result = await bambu_client.set_bed_temp(temp)
@@ -1552,6 +1567,7 @@ async def handle_jsonrpc(
                     if "error" in result:
                         response["error"] = {"code": 400, "message": result["error"]}
                         return response
+                    handled_heater_targets.add(dedupe_key)
                     if cmd in ("M104", "M109"):
                         await state_manager.update_state({"extruder": {"target": temp}})
                     elif cmd in ("M140", "M190"):
@@ -1610,6 +1626,20 @@ async def handle_jsonrpc(
 
                     heater_name = heater_name.lower()
                     if heater_name == "extruder":
+                        heater_object = "extruder"
+                    elif heater_name in ("heater_bed", "bed"):
+                        heater_object = "heater_bed"
+                    elif heater_name in ("heater_chamber", "chamber"):
+                        heater_object = "heater_chamber"
+                    else:
+                        heater_object = ""
+
+                    dedupe_key = (heater_object, int(round(target)))
+                    if dedupe_key in handled_heater_targets:
+                        print(f"Skipping duplicate heater command in script: {line}")
+                        continue
+
+                    if heater_name == "extruder":
                         result = await bambu_client.set_nozzle_temp(target)
                     elif heater_name in ("heater_bed", "bed"):
                         result = await bambu_client.set_bed_temp(target)
@@ -1621,6 +1651,7 @@ async def handle_jsonrpc(
                     if "error" in result:
                         response["error"] = {"code": 400, "message": result["error"]}
                         return response
+                    handled_heater_targets.add(dedupe_key)
                     if heater_name == "extruder":
                         await state_manager.update_state({"extruder": {"target": target}})
                     elif heater_name in ("heater_bed", "bed"):

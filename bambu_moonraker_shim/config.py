@@ -7,6 +7,7 @@ class Config:
     BAMBU_HOST = os.getenv("BAMBU_HOST", "192.168.1.100")
     BAMBU_SERIAL = os.getenv("BAMBU_SERIAL", "")
     BAMBU_ACCESS_CODE = os.getenv("BAMBU_ACCESS_CODE", "")
+    BAMBU_USER_ID = os.getenv("BAMBU_USER_ID", "1234567890")
     BAMBU_MODEL = os.getenv("BAMBU_MODEL", "")
     BAMBU_MODE = os.getenv("BAMBU_MODE", "local")  # local | cloud
     

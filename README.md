@@ -59,9 +59,9 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
 * **Print control**:
   * Pause / Resume / Cancel prints
 * **Temperature control**:
-  * Set bed temperature (M140 / Moonraker commands)
-  * Set extruder temperature (M104 T0 / Moonraker commands)
-  * Set chamber temperature (M141 / Moonraker commands)
+  * Set bed temperature (M190 / Moonraker commands)
+  * Set extruder temperature (M109 / Moonraker commands)
+  * Set chamber temperature (M191 / Moonraker commands)
 * **Klipper macro support**:
   * `PRINT_START` / `START_PRINT` (with bed/hotend/chamber parameters)
   * `PRINT_END` / `END_PRINT`
@@ -277,9 +277,9 @@ The shim supports multiple ways to control heater temperatures:
 
 #### Via G-code
 ```gcode
-M104 T0 S220     # Set extruder to 220°C (non-blocking)
-M140 S60         # Set bed to 60°C (non-blocking)
-M141 S45         # Set chamber to 45°C (non-blocking)
+M109 S220        # Set extruder to 220°C
+M190 S60         # Set bed to 60°C
+M191 S45         # Set chamber to 45°C
 ```
 
 #### Via Moonraker Command
@@ -298,8 +298,7 @@ SET_HEATER_TEMPERATURE HEATER=heater_chamber TARGET=45
 ### Important Notes
 
 **Behavior notes:**
-* Heater commands are always sent as non-blocking MQTT G-code (`M104 T0`, `M140`, `M141`)
-* `M109`/`M190` requests are accepted for compatibility but mapped to non-blocking behavior
+* Heater commands are sent using MQTT G-code (`M109`, `M190`, `M191`)
 * The shim tracks target temperatures locally when MQTT telemetry does not immediately echo targets
 
 ## Klipper Macro Support
@@ -323,9 +322,9 @@ START_PRINT BED=60 HOTEND=220 CHAMBER=45
 
 **Actions performed:**
 1. Home all axes (G28)
-2. Heat bed to target temperature (non-blocking)
-3. Heat nozzle to target temperature (non-blocking)
-4. Heat chamber to target temperature when provided (non-blocking)
+2. Heat bed to target temperature
+3. Heat nozzle to target temperature
+4. Heat chamber to target temperature when provided
 5. Auto-leveling (handled automatically by Bambu printer)
 
 ### PRINT_END / END_PRINT
@@ -342,7 +341,7 @@ END_PRINT
 2. Turn off all fans (part cooling, aux, chamber)
 3. Disable motors
 
-**Note:** Heaters are turned down with non-blocking commands; cooling behavior is firmware-controlled.
+**Note:** Cooling behavior is firmware-controlled.
 
 ### Other Supported Macros
 
@@ -393,7 +392,7 @@ END_PRINT
 
 ### Temperature Control
 
-* The shim intentionally uses non-blocking heater commands over MQTT (`M104 T0`, `M140`, `M141`)
+* The shim uses heater commands over MQTT (`M109`, `M190`, `M191`)
 * Firmware behavior can vary by printer and firmware revision
 
 ### FTPS File Operations
@@ -423,8 +422,8 @@ END_PRINT
 
 ### Temperature Commands Not Working
 
-1. **For heating**: Use `M104 T0`, `M140`, and `M141` or `SET_HEATER_TEMPERATURE`
-2. **For direct control**: Use `M104 T0`, `M140`, and `M141` or `SET_HEATER_TEMPERATURE`
+1. **For heating**: Use `M109`, `M190`, and `M191` or `SET_HEATER_TEMPERATURE`
+2. **For direct control**: Use `M109`, `M190`, and `M191` or `SET_HEATER_TEMPERATURE`
 3. **For turning off**: Set target to `0` and allow firmware-managed cooldown
 4. Ensure printer is in LAN-only mode (not connected to cloud)
 5. Check that commands sent via console include proper formatting
