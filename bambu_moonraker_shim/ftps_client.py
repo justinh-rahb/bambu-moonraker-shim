@@ -2,6 +2,7 @@ import ftplib
 import re
 import socket
 import ssl
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -73,6 +74,7 @@ class BambuFTPSClient:
 
         self._retry_delays_seconds = [2, 4, 8]
         self._chunk_size_bytes = 64 * 1024
+        self._operation_lock = threading.Lock()
 
         self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         self.context.check_hostname = False
@@ -100,7 +102,11 @@ class BambuFTPSClient:
         last_error: Optional[Exception] = None
         for attempt in range(len(self._retry_delays_seconds) + 1):
             try:
-                return operation()
+                # The underlying FTP client/connection is not thread-safe.
+                # Serialize FTPS operations so async callers using to_thread
+                # don't corrupt shared socket/session state.
+                with self._operation_lock:
+                    return operation()
             except Exception as exc:
                 last_error = exc
                 self._reset_connection()

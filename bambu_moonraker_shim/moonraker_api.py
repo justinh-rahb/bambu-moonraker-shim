@@ -24,6 +24,22 @@ _DEFAULT_DISK_USAGE = {
     "free": 31 * 1024 * 1024 * 1024,
 }
 
+_GCODE_FILE_SUFFIXES = (".gcode", ".gcode.3mf", ".3mf")
+_EXCLUDED_GCODES_ROOT_DIRS = {
+    "logger",
+    "recorder",
+    "image",
+    "ipcam",
+    "timelapse",
+    "cache",
+    "language",
+    "model",
+    "corelogger",
+    "verify_job",
+    ".spotlight-v100",
+    ".fseventsd",
+}
+
 CONFIG_FILES = {
     "printer.cfg": "\n".join(
         [
@@ -74,7 +90,7 @@ def _config_file_listing():
     for name, content in CONFIG_FILES.items():
         files.append(
             {
-                "path": f"config/{name}",
+                "path": name,
                 "size": len(content.encode("utf-8")),
                 "modified": now,
                 "permissions": "rw",
@@ -93,7 +109,7 @@ def _config_directory_listing():
                 "modified": now,
                 "size": len(content.encode("utf-8")),
                 "permissions": "rw",
-                "path": _join_moonraker_path("config", name),
+                "path": name,
             }
         )
     return {
@@ -161,7 +177,7 @@ def _mock_directory_listing(path: str) -> Dict[str, Any]:
                     "modified": mock_file["modified"],
                     "size": mock_file["size"],
                     "permissions": "rw",
-                    "path": _join_moonraker_path(path, mock_file["name"]),
+                    "path": _directory_entry_path(path, mock_file["name"]),
                 }
             )
 
@@ -189,7 +205,7 @@ def _build_file_list(root: str) -> List[Dict[str, Any]]:
         for mock_file in _list_mock_local_files():
             files.append(
                 {
-                    "path": _join_moonraker_path("gcodes", mock_file["name"]),
+                    "path": mock_file["name"],
                     "size": mock_file["size"],
                     "modified": mock_file["modified"],
                     "permissions": "rw",
@@ -201,15 +217,18 @@ def _build_file_list(root: str) -> List[Dict[str, Any]]:
     remote_files = ftps_client.list_files(Config.BAMBU_FTPS_UPLOADS_DIR)
 
     # Filter to only show gcode files (not directories)
-    # Mainsail expects a flat list with "path" starting with "gcodes/"
+    # server.files.list returns paths relative to the selected root.
     files = []
     for f in remote_files:
+        if "/" in f["name"]:
+            continue
         if not f["is_dir"]:
             # Filter by extension if desired
             name = f["name"]
-            if name.endswith((".gcode", ".gcode.3mf", ".3mf")):
+            if name.lower().endswith(_GCODE_FILE_SUFFIXES):
+                display_name = _display_filename(name)
                 files.append({
-                    "path": _join_moonraker_path("gcodes", name),
+                    "path": display_name,
                     "size": f["size"],
                     "modified": f["modified"],
                     "permissions": "rw",
@@ -218,21 +237,19 @@ def _build_file_list(root: str) -> List[Dict[str, Any]]:
     return files
 
 
-def _file_roots_payload() -> Dict[str, Any]:
-    return {
-        "roots": [
-            {
-                "name": "gcodes",
-                "path": "gcodes",
-                "permissions": "rw",
-            },
-            {
-                "name": "config",
-                "path": "config",
-                "permissions": "rw",
-            },
-        ]
-    }
+def _file_roots_payload() -> List[Dict[str, str]]:
+    return [
+        {
+            "name": "gcodes",
+            "path": Config.GCODES_DIR or "/tmp/gcodes",
+            "permissions": "rw",
+        },
+        {
+            "name": "config",
+            "path": "/app/config",
+            "permissions": "rw",
+        },
+    ]
 
 
 def _server_info_payload(include_history: bool = True) -> Dict[str, Any]:
@@ -266,6 +283,67 @@ def _get_disk_usage(root: str) -> Dict[str, int]:
     except Exception as exc:
         print(f"Disk usage lookup failed: {exc}")
         return dict(_DEFAULT_DISK_USAGE)
+
+
+def _include_gcodes_directory_entry(path: str, name: str) -> bool:
+    if path != "gcodes":
+        return True
+    lower_name = name.lower()
+    if lower_name.startswith("."):
+        return False
+    return lower_name not in _EXCLUDED_GCODES_ROOT_DIRS
+
+
+def _include_gcodes_file_entry(path: str, name: str) -> bool:
+    if path != "gcodes":
+        return True
+    return name.lower().endswith(_GCODE_FILE_SUFFIXES)
+
+
+def _is_root_direct_child(entry: Dict[str, Any]) -> bool:
+    raw_path = str(entry.get("path") or entry.get("name") or "").strip()
+    if not raw_path:
+        return False
+    normalized = raw_path.lstrip("/")
+    if normalized.startswith("gcodes/"):
+        normalized = normalized[7:]
+    return "/" not in normalized
+
+
+def _directory_entry_path(path: str, name: str) -> str:
+    if path.startswith("gcodes/"):
+        subdir = path[7:].strip("/")
+        return f"{subdir}/{name}".strip("/")
+    if path.startswith("config/"):
+        subdir = path[7:].strip("/")
+        return f"{subdir}/{name}".strip("/")
+    return name
+
+
+def _cache_has_non_root_entries(entries: Optional[List[Dict[str, Any]]]) -> bool:
+    if not entries:
+        return False
+    return any(not _is_root_direct_child(entry) for entry in entries)
+
+
+def _display_filename(name: str) -> str:
+    lower_name = name.lower()
+    if lower_name.endswith(".gcode.3mf"):
+        # Mainsail's file browser expects canonical gcode-like filenames.
+        return name[:-4]
+    return name
+
+
+def _cached_file_exists(name: str) -> bool:
+    sqlite_manager = get_sqlite_manager()
+    cached = sqlite_manager.get_cached_files(max_age=300) or []
+    target = name.lower()
+    for entry in cached:
+        if entry.get("is_dir"):
+            continue
+        if str(entry.get("name", "")).lower() == target:
+            return True
+    return False
 
 
 def _m220_percent_to_mode(percent: float) -> int:
@@ -373,8 +451,17 @@ def _parse_macro_param(
 
 def _normalize_filename(filename: str) -> str:
     if filename.startswith("gcodes/"):
-        return filename[7:]
-    return filename
+        filename = filename[7:]
+    normalized = filename.lstrip("/")
+    if (
+        Config.BAMBU_SERIAL
+        and normalized.lower().endswith(".gcode")
+        and not normalized.lower().endswith(".gcode.3mf")
+    ):
+        candidate = f"{normalized}.3mf"
+        if _cached_file_exists(candidate):
+            return candidate
+    return normalized
 
 
 async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, Any]:
@@ -601,17 +688,17 @@ async def objects_query(request: Request):
 @router.get("/server/files/list")
 async def file_list(root: str = "gcodes"):
     try:
-        files = _build_file_list(root)
-        return success_response(files)
+        files = await asyncio.to_thread(_build_file_list, root)
+        return files
     except Exception as e:
         print(f"Error listing files: {e}")
         # Return empty list on error rather than failing
-        return success_response([])
+        return []
 
 
 @router.get("/server/files/roots")
 async def file_roots():
-    return success_response(_file_roots_payload())
+    return _file_roots_payload()
 
 
 @router.get("/server/files/directory")
@@ -623,10 +710,10 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
     sqlite_manager = get_sqlite_manager()
 
     if path == "config":
-        return success_response(_config_directory_listing())
+        return _config_directory_listing()
 
     if not Config.BAMBU_SERIAL and path == "gcodes":
-        return success_response(_mock_directory_listing(path))
+        return _mock_directory_listing(path)
     
     # Determine actua FTPS path to check
     ftps_path = Config.BAMBU_FTPS_UPLOADS_DIR
@@ -640,14 +727,17 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
     cached_files = None
     if path == "gcodes":
             cached_files = sqlite_manager.get_cached_files(max_age=300)
+            if _cache_has_non_root_entries(cached_files):
+                cached_files = None
     
     if cached_files is None:
         # Cache miss - fetch from FTPS
         print(f"Fetching files from FTPS for path: {ftps_path} (requested: {path})")
         try:
-            remote_files = ftps_client.list_files(ftps_path)
+            remote_files = await asyncio.to_thread(ftps_client.list_files, ftps_path)
             # Only cache the root listing for now
             if path == "gcodes":
+                sqlite_manager.clear_file_cache()
                 sqlite_manager.cache_files(remote_files)
             cached_files = remote_files
         except Exception as e:
@@ -659,21 +749,28 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
     files = []
     
     for f in cached_files:
+        if path == "gcodes" and not _is_root_direct_child(f):
+            continue
         if f["is_dir"]:
+            if not _include_gcodes_directory_entry(path, f["name"]):
+                continue
             dirs.append({
                 "dirname": f["name"],
                 "modified": f["modified"],
                 "size": f["size"],
                 "permissions": "rw",
-                "path": _join_moonraker_path(path, f["name"]),
+                "path": _directory_entry_path(path, f["name"]),
             })
         else:
+            if not _include_gcodes_file_entry(path, f["name"]):
+                continue
+            display_name = _display_filename(f["name"])
             files.append({
-                "filename": f["name"],
+                "filename": display_name,
                 "modified": f["modified"],
                 "size": f["size"],
                 "permissions": "rw",
-                "path": _join_moonraker_path(path, f["name"]),
+                "path": _directory_entry_path(path, display_name),
             })
     
     result = {
@@ -687,7 +784,7 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
         }
     }
     
-    return success_response(result)
+    return result
 
 
 @router.post("/server/files/upload")
@@ -791,7 +888,8 @@ async def file_delete(filename: str):
                 os.unlink(local_path)
             return success_response("ok")
 
-        ftps_client.delete_file(filename)
+        target_name = _normalize_filename(filename)
+        ftps_client.delete_file(target_name)
         
         # Invalidate file cache so next list is fresh
         sqlite_manager = get_sqlite_manager()
@@ -827,7 +925,8 @@ async def file_download(root: str, path: str):
                 headers={"Content-Disposition": f'attachment; filename="{local_name}"'},
             )
         try:
-            payload = await asyncio.to_thread(ftps_client.download_file, path)
+            target_path = _normalize_filename(path)
+            payload = await asyncio.to_thread(ftps_client.download_file, target_path)
         except FileNotFoundError:
             return error_response(404, "File not found")
         except Exception as exc:
@@ -1567,11 +1666,11 @@ async def handle_jsonrpc(
         params = request.get("params", {})
         root = params.get("root", "gcodes")
         try:
-            files = _build_file_list(root)
-            response["result"] = {"root": root, "files": files}
+            files = await asyncio.to_thread(_build_file_list, root)
+            response["result"] = files
         except Exception as e:
             print(f"Error listing files: {e}")
-            response["result"] = {"root": root, "files": []}
+            response["result"] = []
 
     elif method == "server.files.get_directory":
         # Get file listing with caching
@@ -1605,14 +1704,17 @@ async def handle_jsonrpc(
         cached_files = None
         if path == "gcodes":
              cached_files = sqlite_manager.get_cached_files(max_age=300)
+             if _cache_has_non_root_entries(cached_files):
+                 cached_files = None
         
         if cached_files is None:
             # Cache miss - fetch from FTPS
             print(f"Fetching files from FTPS for path: {ftps_path} (requested: {path})")
             try:
-                remote_files = ftps_client.list_files(ftps_path)
+                remote_files = await asyncio.to_thread(ftps_client.list_files, ftps_path)
                 # Only cache the root listing for now to avoid complexity
                 if path == "gcodes":
+                    sqlite_manager.clear_file_cache()
                     sqlite_manager.cache_files(remote_files)
                 cached_files = remote_files
             except Exception as e:
@@ -1626,21 +1728,28 @@ async def handle_jsonrpc(
         files = []
         
         for f in cached_files:
+            if path == "gcodes" and not _is_root_direct_child(f):
+                continue
             if f["is_dir"]:
+                if not _include_gcodes_directory_entry(path, f["name"]):
+                    continue
                 dirs.append({
                     "dirname": f["name"],
                     "modified": f["modified"],
                     "size": f["size"],
                     "permissions": "rw",
-                    "path": _join_moonraker_path(path, f["name"]),
+                    "path": _directory_entry_path(path, f["name"]),
                 })
             else:
+                if not _include_gcodes_file_entry(path, f["name"]):
+                    continue
+                display_name = _display_filename(f["name"])
                 files.append({
-                    "filename": f["name"],
+                    "filename": display_name,
                     "modified": f["modified"],
                     "size": f["size"],
                     "permissions": "rw",
-                    "path": _join_moonraker_path(path, f["name"]),
+                    "path": _directory_entry_path(path, display_name),
                 })
         
         response["result"] = {
