@@ -484,7 +484,10 @@ END_PRINT
 
 ## Limitations / Roadmap
 
-* Better start print implementation
+* [Clean-room architecture overhaul](docs/clean-room-architecture.md): re-evaluate
+  current Bambu behavior, introduce a normalized printer domain, isolate
+  transports, and expose an explicit Moonraker compatibility boundary
+* Harden start-print acknowledgement and upload verification
 * Full G-code console with command history
 * User-defined custom macros
 * Webcam bridging
