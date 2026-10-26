@@ -4,6 +4,7 @@ Handles structured data that benefits from queries and indexing.
 UI configuration still uses database_manager.py (JSON-based).
 """
 
+import os
 import sqlite3
 import time
 from typing import List, Dict, Optional, Any
@@ -281,7 +282,7 @@ class SQLiteManager:
             cursor.execute(query, values)
     
     def get_job_history(self, limit: int = 50, before: Optional[int] = None, 
-                       since: Optional[int] = None, order: str = "desc") -> Dict[str, Any]:
+                       since: Optional[int] = None, order: str = "desc", start: int = 0) -> Dict[str, Any]:
         """
         Get job history with pagination.
         
@@ -294,6 +295,8 @@ class SQLiteManager:
         Returns:
             Dict with 'count' and 'jobs' list
         """
+        if start < 0 or limit < 0 or order.lower() not in {"asc", "desc"}:
+            raise ValueError("Invalid history pagination")
         with self.get_connection() as conn:
             cursor = conn.cursor()
             
@@ -301,11 +304,11 @@ class SQLiteManager:
             where_clauses = []
             params = []
             
-            if before:
+            if before is not None:
                 where_clauses.append("start_time < ?")
                 params.append(before)
             
-            if since:
+            if since is not None:
                 where_clauses.append("start_time > ?")
                 params.append(since)
             
@@ -317,12 +320,12 @@ class SQLiteManager:
             total_count = cursor.fetchone()['count']
             
             # Get jobs
-            params.append(limit)
+            params.extend([limit, start])
             cursor.execute(f"""
                 SELECT * FROM job_history 
                 {where_sql}
                 ORDER BY start_time {order_sql}
-                LIMIT ?
+                LIMIT ? OFFSET ?
             """, params)
             
             jobs = []
@@ -391,5 +394,5 @@ def get_sqlite_manager() -> SQLiteManager:
     """Get singleton SQLite manager instance."""
     global _sqlite_manager
     if _sqlite_manager is None:
-        _sqlite_manager = SQLiteManager()
+        _sqlite_manager = SQLiteManager(os.getenv("SHIM_DB_PATH", "bambu_shim.db"))
     return _sqlite_manager

@@ -13,3 +13,7 @@ Dockerfile
 .dockerignore
 moonraker.json
 bambu_shim.db
+.backups/
+*.db-journal
+*.db-wal
+*.db-shm

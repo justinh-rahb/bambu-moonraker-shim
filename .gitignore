@@ -10,3 +10,7 @@ venv/
 moonraker.json
 gcodes/
 bambu_shim.db
+.backups/
+*.db-journal
+*.db-wal
+*.db-shm

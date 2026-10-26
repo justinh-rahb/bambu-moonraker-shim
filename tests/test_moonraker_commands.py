@@ -3,7 +3,6 @@ from unittest.mock import AsyncMock, patch
 
 from bambu_moonraker_shim import moonraker_api
 from bambu_moonraker_shim.moonraker_api import (
-    _database_namespace_value,
     _extract_skip_object_ids,
     _m220_percent_to_mode,
 )
@@ -23,10 +22,6 @@ class MoonrakerCommandTests(unittest.TestCase):
         self.assertEqual(_extract_skip_object_ids({"NAME": "object_12"}), [12])
         self.assertEqual(_extract_skip_object_ids({"NAME": "foo", "OBJECT": "2"}), [2])
 
-    def test_database_namespace_value_flattens_fluidd_without_key(self):
-        value = {"layout.layouts.dashboard.container1": [1, 2, 3]}
-        converted = _database_namespace_value("fluidd", None, value)
-        self.assertEqual(converted["layout"]["layouts"]["dashboard"]["container1"], [1, 2, 3])
 
 
 class MoonrakerHeaterDedupTests(unittest.IsolatedAsyncioTestCase):

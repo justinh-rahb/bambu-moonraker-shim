@@ -64,8 +64,6 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . /app
-
 RUN curl -L -o /tmp/mainsail.zip ${MAINSAIL_URL} \
     && if [ -n "${MAINSAIL_SHA256}" ]; then echo "${MAINSAIL_SHA256}  /tmp/mainsail.zip" | sha256sum -c -; fi \
     && rm -rf /usr/share/nginx/html/* \
@@ -80,6 +78,8 @@ RUN curl -L -o /tmp/mainsail.zip ${MAINSAIL_URL} \
     && if [ -d /tmp/fluidd/fluidd ]; then mv /tmp/fluidd/fluidd/* /usr/share/nginx/fluidd/; else mv /tmp/fluidd/* /usr/share/nginx/fluidd/; fi \
     && rm -rf /tmp/mainsail /tmp/mainsail.zip \
     && rm -rf /tmp/fluidd /tmp/fluidd.zip
+
+COPY . /app
 
 COPY --from=cnc-builder /out/ /usr/share/nginx/cnc/
 

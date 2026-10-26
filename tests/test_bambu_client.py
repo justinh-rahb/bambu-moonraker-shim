@@ -9,6 +9,36 @@ from bambu_moonraker_shim.state_manager import state_manager
 
 
 class BambuClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_malformed_telemetry_does_not_disconnect(self):
+        from types import SimpleNamespace
+        client = BambuClient()
+        client._parse_telemetry = AsyncMock()
+        for payload in (b"[]", b"null", b'{"print": []}', b"\xff", b"{broken"):
+            await client._handle_message(SimpleNamespace(payload=payload))
+        client._parse_telemetry.assert_not_awaited()
+        await client._handle_message(SimpleNamespace(payload=b'{"print":{"bed_temper":25}}'))
+        client._parse_telemetry.assert_awaited_once_with({"bed_temper": 25})
+
+    async def test_prepare_and_failed_telemetry(self):
+        client = BambuClient()
+        with patch.object(state_manager, "update_state", AsyncMock()) as update:
+            await client._parse_telemetry({"gcode_state": "PREPARE", "subtask_name": "test"})
+            self.assertEqual(update.await_args.args[0]["print_stats"]["state"], "printing")
+            await client._parse_telemetry({"gcode_state": "FAILED"})
+            self.assertEqual(update.await_args.args[0]["print_stats"]["state"], "error")
+
+    async def test_mock_lifecycle_stops_background_task(self):
+        client = BambuClient()
+        client.serial = ""
+        await client.start()
+        task = client._loop_task
+        await client.start()
+        self.assertIs(client._loop_task, task)
+        await client.stop()
+        self.assertTrue(task.cancelled())
+        self.assertFalse(client.connected)
+        self.assertIsNone(client._loop_task)
+
     async def test_publish_command_uses_qos_1_and_sequence_id(self):
         client = BambuClient()
         client.connected = True

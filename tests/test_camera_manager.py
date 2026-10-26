@@ -55,7 +55,7 @@ class MoonrakerWebcamTests(unittest.TestCase):
         ):
             webcams = moonraker_api._current_webcams()
 
-        self.assertEqual(webcams, [builtin, {"uid": "user-camera", "name": "USB Cam"}])
+        self.assertEqual(webcams, [{**builtin, "name": "Duplicate"}, {"uid": "user-camera", "name": "USB Cam"}])
 
     def test_mjpeg_chunk_has_boundary_and_headers(self):
         from bambu_moonraker_shim import moonraker_api

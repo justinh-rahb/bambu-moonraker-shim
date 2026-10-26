@@ -17,6 +17,7 @@ class BambuClient:
         self.connected = False
         self._mock_mode = False
         self._mqtt_client: Optional[aiomqtt.Client] = None
+        self._loop_task: Optional[asyncio.Task] = None
         self._sequence_id = 0
         self._prefer_qos0_for_print = False
         self._local_targets: Dict[str, Dict[str, Any]] = {
@@ -45,6 +46,7 @@ class BambuClient:
         self._mock_progress = 0.0
         self._mock_state = "standby"
         self._mock_filename = "mock_file.gcode"
+        self._job_finished_at: Optional[float] = None
         self._job_started_at: Optional[float] = None
         self._job_paused_at: Optional[float] = None
         self._job_paused_seconds = 0.0
@@ -56,14 +58,27 @@ class BambuClient:
 
     async def start(self):
         """Starts the MQTT loop."""
+        if self._loop_task and not self._loop_task.done():
+            return
         if not self.serial:
              print("Warning: BAMBU_SERIAL not set. Running in mock mode.")
              self._mock_mode = True
              self.connected = True
-             asyncio.create_task(self._mock_loop())
+             self._loop_task = asyncio.create_task(self._mock_loop())
              return
 
-        asyncio.create_task(self._connect_loop())
+        self._loop_task = asyncio.create_task(self._connect_loop())
+
+    async def stop(self):
+        if self._loop_task:
+            self._loop_task.cancel()
+            try:
+                await self._loop_task
+            except asyncio.CancelledError:
+                pass
+            self._loop_task = None
+        self.connected = False
+        self._mqtt_client = None
 
     async def _connect_loop(self):
         while True:
@@ -89,6 +104,9 @@ class BambuClient:
                     # Subscribe to report topic
                     topic = f"device/{self.serial}/report"
                     await client.subscribe(topic)
+                    # Bambu reports are deltas. Seed state after every reconnect.
+                    for query in ({"pushing": {"command": "pushall"}}, {"info": {"command": "get_version"}}):
+                        await client.publish(f"device/{self.serial}/request", json.dumps(self._inject_sequence_id(query)), qos=0)
                     
                     async for message in client.messages:
                         await self._handle_message(message)
@@ -101,6 +119,9 @@ class BambuClient:
                 print(f"Unexpected Error: {e}")
                 self.connected = False
                 await asyncio.sleep(5)
+            finally:
+                self.connected = False
+                self._mqtt_client = None
 
     async def _handle_message(self, message):
         try:
@@ -108,7 +129,9 @@ class BambuClient:
             # print(f"Received: {payload.keys()}") # Debug
             
             # Bambu payload structure is complex. We look for 'print' object usually
-            if "print" in payload:
+            if not isinstance(payload, dict):
+                return
+            if isinstance(payload.get("print"), dict):
                 data = payload["print"]
                 if isinstance(data, dict):
                     command_name = data.get("command")
@@ -116,8 +139,8 @@ class BambuClient:
                         print(f"MQTT report message: {json.dumps(data)}")
                 await self._parse_telemetry(data)
                 
-        except json.JSONDecodeError:
-            print("Failed to decode JSON payload")
+        except (UnicodeDecodeError, ValueError, TypeError) as exc:
+            print(f"Ignoring malformed telemetry: {exc}")
 
     async def _parse_telemetry(self, data: Dict[str, Any]):
         """Maps Bambu telemetry to Moonraker state."""
@@ -199,12 +222,14 @@ class BambuClient:
             bambu_state = data.get("gcode_state", "IDLE")
             klipper_state = "standby"
             
-            if bambu_state == "RUNNING":
+            if bambu_state in {"RUNNING", "PREPARE", "SLICING"}:
                 klipper_state = "printing"
             elif bambu_state == "PAUSE":
                 klipper_state = "paused"
             elif bambu_state == "FINISH":
                 klipper_state = "complete" # Or standby?
+            elif bambu_state == "FAILED":
+                klipper_state = "error"
             elif bambu_state == "IDLE":
                 klipper_state = "standby"
 
@@ -279,7 +304,8 @@ class BambuClient:
 
     def _update_job_timing(self, state: str, filename: str, now: float):
         if state == "printing":
-            if not self._active_job_filename or (filename and filename != self._active_job_filename):
+            if self._job_started_at is None or self._job_finished_at is not None or (filename and filename != self._active_job_filename):
+                self._job_finished_at = None
                 self._job_started_at = now
                 self._job_paused_at = None
                 self._job_paused_seconds = 0.0
@@ -302,6 +328,11 @@ class BambuClient:
                 self._job_paused_at = now
             return
 
+        if state in {"complete", "error", "cancelled"}:
+            if self._job_started_at is not None and self._job_finished_at is None:
+                self._job_finished_at = now
+            return
+        self._job_finished_at = None
         self._job_started_at = None
         self._job_paused_at = None
         self._job_paused_seconds = 0.0
@@ -312,6 +343,7 @@ class BambuClient:
         if self._job_started_at is None:
             return 0.0
         now = time.time() if now is None else now
+        now = min(now, self._job_finished_at) if self._job_finished_at is not None else now
         return max(0.0, now - self._job_started_at)
 
     def _estimated_total_duration(self, now: Optional[float] = None) -> float:
@@ -342,6 +374,7 @@ class BambuClient:
         if self._job_started_at is None:
             return 0.0
         now = time.time() if now is None else now
+        now = min(now, self._job_finished_at) if self._job_finished_at is not None else now
         paused_seconds = self._job_paused_seconds
         if self._job_paused_at is not None:
             paused_seconds += max(0.0, now - self._job_paused_at)

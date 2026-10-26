@@ -273,7 +273,7 @@ class StateManager:
         sqlite_manager = get_sqlite_manager()
         
         # Starting a new print
-        if new_state == "printing" and self._last_print_state != "printing":
+        if new_state in {"printing", "paused"} and self._current_job_id is None:
             self._current_job_id = str(uuid.uuid4())[:8]  # Short ID
             self._current_job_start = time.time()
             print(f"Job started: {self._current_job_id} - {filename}")

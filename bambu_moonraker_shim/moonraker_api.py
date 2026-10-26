@@ -6,13 +6,13 @@ import uuid
 import os
 import tempfile
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, UploadFile, File
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Form
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from bambu_moonraker_shim.state_manager import state_manager
 from bambu_moonraker_shim.bambu_client import bambu_client
 from bambu_moonraker_shim.camera_manager import camera_manager
 from bambu_moonraker_shim.config import Config
-from bambu_moonraker_shim.database_manager import database_manager
+from bambu_moonraker_shim.database_manager import DatabaseError, database_manager
 from bambu_moonraker_shim.fan_control import FanTarget, build_fan_command
 from bambu_moonraker_shim.ftps_client import ftps_client
 from bambu_moonraker_shim.sqlite_manager import get_sqlite_manager
@@ -43,7 +43,6 @@ _EXCLUDED_GCODES_ROOT_DIRS = {
     ".spotlight-v100",
     ".fseventsd",
 }
-_NAMESPACES_WITH_NESTED_DB_VIEW = {"mainsail", "fluidd"}
 
 CONFIG_FILES = {
     "printer.cfg": "\n".join(
@@ -183,6 +182,9 @@ def _current_webcams() -> List[Dict[str, Any]]:
         return webcams
 
     builtin_uid = builtin_webcam["uid"]
+    stored_builtin = next((cam for cam in webcams if cam.get("uid") == builtin_uid), {})
+    builtin_webcam = {**builtin_webcam, **{key: value for key, value in stored_builtin.items()
+                       if key in {"name", "location", "enabled", "flip_horizontal", "flip_vertical", "rotation", "target_fps"}}}
     filtered = [cam for cam in webcams if cam.get("uid") != builtin_uid]
     return [builtin_webcam, *filtered]
 
@@ -317,22 +319,24 @@ def _server_info_payload(include_history: bool = True) -> Dict[str, Any]:
         "websocket",
         "database",
         "file_manager",
-        "webcams",
+        "webcam",
     ]
     if include_history:
         components.extend(["history", "job_queue"])
 
+    connected = bambu_client.connected
     return {
-        "state": "ready",
-        "state_message": "Printer is ready",
-        "klippy_connected": True,
-        "klippy_state": "ready",
+        "state": "ready" if connected else "disconnected",
+        "state_message": "Printer is ready" if connected else "Printer MQTT disconnected",
+        "klippy_connected": connected,
+        "klippy_state": "ready" if connected else "disconnected",
         "components": components,
         "registered_directories": ["gcodes", "config"],
         "failed_components": [],
         "warnings": [],
         "version": "v0.0.1-bambu-shim",
         "api_version": [1, 0, 0],
+        "api_version_string": "1.0.0",
     }
 
 
@@ -665,26 +669,55 @@ def error_response(code: int, message: str) -> JSONResponse:
     )
 
 
-def flatten_to_nested(flat_dict: dict) -> dict:
-    """Convert flat dotted keys to nested dict structure.
-    E.g., {"dashboard.layout": []} -> {"dashboard": {"layout": []}}
-    """
-    nested = {}
-    for key, value in flat_dict.items():
-        parts = key.split(".")
-        current = nested
-        for part in parts[:-1]:
-            if part not in current:
-                current[part] = {}
-            current = current[part]
-        current[parts[-1]] = value
-    return nested
+def _database_request(method: str, params: Dict[str, Any]):
+    if method == "server.database.list":
+        return {"namespaces": database_manager.get_namespaces(), "backups": []}
+    namespace = params.get("namespace")
+    key = params.get("key")
+    if method in {"server.database.post_item", "server.database.delete_item"}:
+        if namespace in {"moonraker", "database", "authorization", "history"}:
+            raise DatabaseError(403, "Namespace is reserved for internal use")
+    if method == "server.database.get_item":
+        value = database_manager.get_item(namespace, key, strict=True)
+    elif method == "server.database.post_item":
+        if "value" not in params:
+            raise DatabaseError(400, "Value required")
+        value = database_manager.post_item(namespace, key, params["value"])
+    elif method == "server.database.delete_item":
+        value = database_manager.delete_item(namespace, key)
+    else:
+        raise DatabaseError(404, "Unknown database method")
+    return {"namespace": namespace, "key": key, "value": value}
 
 
-def _database_namespace_value(namespace: Optional[str], key: Optional[str], value: Any) -> Any:
-    if namespace in _NAMESPACES_WITH_NESTED_DB_VIEW and key is None and isinstance(value, dict):
-        return flatten_to_nested(value)
-    return value
+async def _database_http(request: Request, method: str):
+    try:
+        params = {}
+        for name, value in request.query_params.items():
+            name, _, hint = name.partition(":")
+            if hint == "json":
+                value = json.loads(value)
+            elif hint == "int":
+                value = int(value)
+            elif hint == "float":
+                value = float(value)
+            elif hint == "bool":
+                if value.lower() not in {"true", "false"}:
+                    raise ValueError("Invalid boolean")
+                value = value.lower() == "true"
+            params[name] = value
+        if await request.body():
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("Request body must be an object")
+            params.update(body)
+        return success_response(_database_request(method, params))
+    except DatabaseError as exc:
+        return error_response(exc.code, str(exc))
+    except (ValueError, TypeError) as exc:
+        return error_response(400, str(exc))
+    except Exception:
+        return error_response(500, "Database operation failed")
 
 
 # --- HTTP Endpoints ---
@@ -742,6 +775,35 @@ async def webcam_proxy(request: Request, action: str):
     )
 
 
+_GCODE_HELP = {
+    "PAUSE": "Pause the current print", "RESUME": "Resume a paused print",
+    "CANCEL_PRINT": "Cancel the current print", "SET_HEATER_TEMPERATURE": "Set a heater target",
+    "SET_FAN_SPEED": "Set a fan speed", "SET_PIN": "Set the chamber light",
+    "PRINT_START": "Home and set print temperatures", "PRINT_END": "Turn off heaters, fans, and motors",
+    "LOAD_FILAMENT": "Load filament", "UNLOAD_FILAMENT": "Unload filament",
+    "EXCLUDE_OBJECT": "Skip an object by its numeric identifier",
+}
+
+
+@router.get("/printer/gcode/help")
+async def gcode_help():
+    return success_response(_GCODE_HELP)
+
+
+@router.get("/server/history/list")
+async def history_list(limit: int = 50, start: int = 0, before: Optional[int] = None,
+                       since: Optional[int] = None, order: str = "desc"):
+    try:
+        return success_response(get_sqlite_manager().get_job_history(limit, before, since, order, start))
+    except ValueError as exc:
+        return error_response(400, str(exc))
+
+
+@router.get("/server/history/totals")
+async def history_totals():
+    return success_response({"job_totals": get_sqlite_manager().get_job_totals()})
+
+
 @router.get("/server/temperature_store")
 async def http_temperature_store(include_monitors: bool = False):
     data = state_manager.get_temperature_history(include_monitors)
@@ -755,35 +817,32 @@ async def objects_list():
     return success_response({"objects": keys})
 
 
+def _query_objects(objects):
+    if not isinstance(objects, dict):
+        raise ValueError("Objects must be an object")
+    current_state = state_manager.get_state()
+    status = {}
+    for name, fields in objects.items():
+        if fields is not None and (not isinstance(fields, list) or any(not isinstance(f, str) for f in fields)):
+            raise ValueError("Object fields must be an array of strings or null")
+        if name in current_state:
+            status[name] = current_state[name] if fields is None else {
+                field: current_state[name][field] for field in fields if field in current_state[name]
+            }
+    return {"status": status, "eventtime": time.monotonic()}
+
+
 @router.get("/printer/objects/query")
 async def objects_query(request: Request):
-    """
-    Mainsail passes query like ?objects:json={"extruder":null, ...}
-    FastAPI doesn't automatically parse the weird :json param key well,
-    so we parse query_params manually.
-    """
-    objects_param = None
-    for key, value in request.query_params.items():
-        if key == "objects" or key == "objects:json":
-            try:
-                objects_param = json.loads(value)
-            except:
-                pass
-            break
-
-    if not objects_param:
-        # Fallback if just ?objects=extruder,heater_bed (less common but possible)
-        # But Mainsail strictly uses JSON object map
-        return success_response({"status": {}, "eventtime": time.time()})
-
-    result_status = {}
-    current_state = state_manager.get_state()
-
-    for obj_name, fields in objects_param.items():
-        if obj_name in current_state:
-            result_status[obj_name] = current_state[obj_name]
-
-    return success_response({"status": result_status, "eventtime": time.time()})
+    try:
+        params = request.query_params
+        if "objects:json" in params or "objects" in params:
+            objects = json.loads(params.get("objects:json", params.get("objects")))
+        else:
+            objects = {name: fields.split(",") if fields else None for name, fields in params.items()}
+        return success_response(_query_objects(objects))
+    except (ValueError, TypeError) as exc:
+        return error_response(400, str(exc))
 
 
 @router.get("/server/files/list")
@@ -890,12 +949,27 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
 
 @router.post("/server/files/upload")
 async def file_upload(
+    request: Request,
     file: UploadFile = File(...),
-    path: str = None,
-    print: bool = False,
-    plate: int = 1,
+    path: Optional[str] = Form(None),
+    start_print: bool = Form(False, alias="print"),
+    plate: int = Form(1),
+    root: str = Form("gcodes"),
 ):
     try:
+        if root != "gcodes":
+            return error_response(400, "Only gcodes uploads are supported")
+        if "print" in request.query_params:
+            raw = request.query_params["print"].lower()
+            if raw not in {"true", "false", "1", "0"}:
+                return error_response(400, "Invalid print flag")
+            start_print = raw in {"true", "1"}
+        if "plate" in request.query_params:
+            plate = int(request.query_params["plate"])
+        if plate < 1:
+            return error_response(400, "Plate must be positive")
+        if path or request.query_params.get("path"):
+            return error_response(400, "Subdirectory uploads are not supported")
         if not Config.BAMBU_SERIAL:
             _ensure_mock_file_exists()
             target_name = file.filename or "upload.gcode"
@@ -905,7 +979,7 @@ async def file_upload(
                 fp.write(content)
 
             print_started = False
-            if print:
+            if start_print:
                 result = await bambu_client.start_print(
                     filename=os.path.basename(target_path),
                     plate_number=plate,
@@ -948,7 +1022,7 @@ async def file_upload(
             file_size = len(content)
 
             print_started = False
-            if print:
+            if start_print:
                 result = await bambu_client.start_print(
                     filename=file.filename,
                     plate_number=plate,
@@ -1050,47 +1124,33 @@ async def file_metadata(filename: str):
 
 
 @router.get("/server/database/item")
-async def database_get(namespace: str, key: str = None):
-    # namespace is required, key is optional query param
-    val = database_manager.get_item(namespace, key)
-    val = _database_namespace_value(namespace, key, val)
-    return success_response({"namespace": namespace, "key": key, "value": val})
+async def database_get(request: Request):
+    return await _database_http(request, "server.database.get_item")
 
 
 @router.post("/server/database/item")
 async def database_post(request: Request):
-    try:
-        body = await request.json()
-        namespace = body.get("namespace")
-        key = body.get("key")
-        value = body.get("value")
-
-        if not namespace:
-            return error_response(400, "Namespace required")
-
-        new_val = database_manager.post_item(namespace, key, value)
-        return success_response({"namespace": namespace, "key": key, "value": new_val})
-    except Exception as e:
-        return error_response(400, str(e))
+    return await _database_http(request, "server.database.post_item")
 
 
 @router.delete("/server/database/item")
 async def database_delete(request: Request):
-    # Delete usually comes as query params or body? Moonraker docs say DELETE method.
-    # FastAPI handles method. Query params likely.
-    namespace = request.query_params.get("namespace")
-    key = request.query_params.get("key")
-    if not namespace or not key:
-        return error_response(400, "Namespace and key required")
-
-    val = database_manager.delete_item(namespace, key)
-    return success_response({"namespace": namespace, "key": key, "value": val})
+    return await _database_http(request, "server.database.delete_item")
 
 
 @router.get("/server/database/list")
 async def database_list():
-    namespaces = database_manager.get_namespaces()
-    return success_response({"namespaces": namespaces, "backups": []})
+    return success_response(_database_request("server.database.list", {}))
+
+
+@router.post("/server/jsonrpc")
+async def http_jsonrpc(request: Request):
+    try:
+        body = await request.json()
+    except ValueError:
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
+    response = await handle_jsonrpc(body, 0)
+    return response if response is not None else Response(status_code=204)
 
 
 @router.post("/printer/print/start")
@@ -1208,8 +1268,8 @@ class ConnectionManager:
         for connection in list(self.active_connections):
             try:
                 await connection.send_json(message)
-            except:
-                pass  # Handle broken pipe?
+            except Exception:
+                self.disconnect(connection)
 
 
 manager = ConnectionManager()
@@ -1235,7 +1295,11 @@ async def websocket_endpoint(websocket: WebSocket):
     connection_id = id(websocket)
     try:
         while True:
-            data = await websocket.receive_json()
+            try:
+                data = await websocket.receive_json()
+            except ValueError:
+                await websocket.send_json({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
+                continue
             # Process JSON-RPC request
             response = await handle_jsonrpc(data, connection_id)
             if response:
@@ -1247,7 +1311,34 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 
-async def handle_jsonrpc(
+async def handle_jsonrpc(request, connection_id: int):
+    if isinstance(request, list):
+        if not request:
+            return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request"}}
+        responses = [await handle_jsonrpc(item, connection_id) for item in request]
+        return [response for response in responses if response is not None] or None
+    if not isinstance(request, dict) or request.get("jsonrpc") != "2.0" or not isinstance(request.get("method"), str):
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request"}}
+    response = {"jsonrpc": "2.0", "id": request.get("id")}
+    try:
+        params = request.get("params", {})
+        if not isinstance(params, dict):
+            response["error"] = {"code": -32602, "message": "Params must be an object"}
+        elif request["method"].startswith("server.database."):
+            response["result"] = _database_request(request["method"], params)
+        else:
+            response = await _dispatch_jsonrpc(request, connection_id)
+    except DatabaseError as exc:
+        response["error"] = {"code": exc.code, "message": str(exc)}
+    except (ValueError, TypeError, KeyError) as exc:
+        response["error"] = {"code": -32602, "message": str(exc)}
+    except Exception as exc:
+        print(f"RPC operation failed: {type(exc).__name__}: {exc}")
+        response["error"] = {"code": -32603, "message": "Internal error"}
+    return response if "id" in request else None
+
+
+async def _dispatch_jsonrpc(
     request: Dict[str, Any], connection_id: int
 ) -> Optional[Dict[str, Any]]:
     req_id = request.get("id")
@@ -1262,58 +1353,8 @@ async def handle_jsonrpc(
     elif method == "printer.objects.list":
         keys = list(state_manager.get_state().keys())
         response["result"] = {"objects": keys}
-    elif method == "printer.objects.query":
-        # Similar logic to HTTP query
-        # For simplicity, returning all requested keys
-        params = request.get("params", {}).get("objects", {})
-        result_status = {}
-        current_state = state_manager.get_state()
-        for key in params.keys():
-            if key in current_state:
-                result_status[key] = current_state[key]
-        response["result"] = {"status": result_status, "eventtime": time.time()}
-
-    elif method == "printer.objects.subscribe":
-        # In this simplified shim, we treat subscribe same as query + it enables updates (globally)
-        # Improvements: track per-client subscriptions filtering
-        params = request.get("params", {}).get("objects", {})
-        result_status = {}
-        current_state = state_manager.get_state()
-        for key in params.keys():
-            if key in current_state:
-                result_status[key] = current_state[key]
-        response["result"] = {"status": result_status, "eventtime": time.time()}
-
-    elif method == "server.database.get_item":
-        namespace = request.get("params", {}).get("namespace")
-        key = request.get("params", {}).get("key")
-
-        # Block maintenance reads - return empty to prevent UI errors
-        if namespace == "maintenance":
-            val = {}
-        else:
-            val = database_manager.get_item(namespace, key)
-            val = _database_namespace_value(namespace, key, val)
-
-        response["result"] = {"namespace": namespace, "key": key, "value": val}
-
-    elif method == "server.database.post_item":
-        namespace = request.get("params", {}).get("namespace")
-        key = request.get("params", {}).get("key")
-        value = request.get("params", {}).get("value")
-
-        # Block maintenance writes - Mainsail creates incomplete entries that break the UI
-        if namespace == "maintenance":
-            response["result"] = {"namespace": namespace, "key": key, "value": value}
-        else:
-            new_val = database_manager.post_item(namespace, key, value)
-            response["result"] = {"namespace": namespace, "key": key, "value": new_val}
-
-    elif method == "server.database.delete_item":
-        namespace = request.get("params", {}).get("namespace")
-        key = request.get("params", {}).get("key")
-        val = database_manager.delete_item(namespace, key)
-        response["result"] = {"namespace": namespace, "key": key, "value": val}
+    elif method in {"printer.objects.query", "printer.objects.subscribe"}:
+        response["result"] = _query_objects(request.get("params", {}).get("objects", {}))
 
     elif method == "server.temperature_store":
         include_monitors = request.get("params", {}).get("include_monitors", False)
@@ -1335,6 +1376,9 @@ async def handle_jsonrpc(
 
     elif method == "server.connection.identify":
         response["result"] = {"connection_id": connection_id}
+
+    elif method == "printer.gcode.help":
+        response["result"] = _GCODE_HELP
 
     elif method == "server.gcode_store":
         response["result"] = {"gcode_store": []}
@@ -1375,9 +1419,6 @@ async def handle_jsonrpc(
     elif method == "server.webcams.post_item":
         params = request.get("params", {})
         builtin_webcam = camera_manager.get_builtin_webcam()
-        if builtin_webcam and params.get("uid") == builtin_webcam["uid"]:
-            response["result"] = {"item": builtin_webcam}
-            return response
         # Load existing
         webcams = database_manager.get_item("moonraker", "webcams") or []
 
@@ -1390,6 +1431,10 @@ async def handle_jsonrpc(
                 if cam["uid"] == uid:
                     target_cam = cam
                     break
+
+        if target_cam is None and builtin_webcam and uid == builtin_webcam["uid"]:
+            target_cam = dict(builtin_webcam)
+            webcams.append(target_cam)
 
         if target_cam:
             # Update existing
@@ -1438,6 +1483,9 @@ async def handle_jsonrpc(
             }
             webcams.append(new_cam)
 
+        if builtin_webcam and uid == builtin_webcam["uid"]:
+            for field in ("uid", "stream_url", "snapshot_url", "service"):
+                new_cam[field] = builtin_webcam[field]
         database_manager.post_item("moonraker", "webcams", webcams)
 
         await notify_webcams_changed()
@@ -1479,10 +1527,6 @@ async def handle_jsonrpc(
             "system_memory": {"available": 1000, "total": 2000, "used": 1000},
             "websocket_connections": 1,
         }
-
-    elif method == "server.database.list":
-        namespaces = database_manager.get_namespaces()
-        response["result"] = {"namespaces": namespaces, "backups": []}
 
     elif method == "printer.gcode.script":
         script = request.get("params", {}).get("script", "")
@@ -1923,7 +1967,8 @@ async def handle_jsonrpc(
             limit=limit,
             before=before,
             since=since,
-            order=order
+            order=order,
+            start=start
         )
         
         response["result"] = history
@@ -1949,7 +1994,7 @@ async def handle_jsonrpc(
         # Ignore unknown methods or return null result to avoid errors
         # Mainsail calls a lot of things we might not implement yet.
         print(f"Unknown WS method: {method}")
-        response["result"] = {}  # Safe fallback
+        response["error"] = {"code": -32601, "message": f"Method not found: {method}"}
 
     print(f"RPC Response: {json.dumps(response)}")
     return response
@@ -1961,6 +2006,6 @@ async def notify_webcams_changed():
         {
             "jsonrpc": "2.0",
             "method": "notify_webcams_changed",
-            "params": {"webcams": webcams},
+            "params": [{"webcams": webcams}],
         }
     )

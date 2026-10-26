@@ -53,6 +53,8 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
   * Complete
 * Job progress
 * Currently loaded filename
+* Built-in P1/A1 camera bridge (MJPEG and snapshots)
+* Persistent Mainsail/Fluidd settings through the Moonraker database API
 
 ### Control (Working)
 
@@ -88,7 +90,6 @@ This allows you to use the Mainsail UI to **monitor and partially control** a Ba
 
 * ❌ Full interactive G-code console
 * ❌ Custom user-defined Klipper macros
-* ❌ Webcam bridging
 * ❌ Job queueing
 * ❌ Full Moonraker API parity
 
@@ -265,8 +266,16 @@ http://localhost:82
 
 The bind mounts above persist runtime data across container restarts:
 
-* `bambu_shim.db` - SQLite data store used by the shim
-* `moonraker.json` - Moonraker-style JSON database (Mainsail settings, webcam entries, etc.)
+* `bambu_shim.db` - authoritative SQLite store for UI settings, webcams, file cache, metadata, and job history.
+* `moonraker.json` - legacy settings import source. It is imported once when the SQLite settings store is initialized and is then left untouched. Keep the mount during an upgrade so existing settings are imported.
+
+Settings writes use SQLite transactions, including concurrent saves from Mainsail and Fluidd. Keep the `bambu_shim.db` mount: new settings are no longer written to `moonraker.json`. Back up SQLite with its backup API (or stop the container before copying the database).
+
+The Moonraker database item/list API is supported over HTTP, WebSocket JSON-RPC, and `POST /server/jsonrpc`. String keys use dots for nested fields; array keys preserve literal dots, such as filenames. Missing items return 404, while stored JSON `null` returns success. POST requires `key` and `value`; DELETE returns the removed value. Internal namespaces are read-only through the public database API. Maintenance entries are persisted normally.
+
+This is Moonraker API compatibility; the database file is a shim database, not a native Moonraker database replacement. Database backup/restore HTTP endpoints are not implemented.
+
+Optional paths: `SHIM_DB_PATH` selects the SQLite store, and `MOONRAKER_DB_PATH` selects the legacy JSON import source. Defaults match the mounts above. A malformed non-empty import file stops startup with an error instead of silently losing settings. Repair the source and restart; failed imports are retried.
 
 Create files once if needed:
 
@@ -487,7 +496,6 @@ END_PRINT
 * Better start print implementation
 * Full G-code console with command history
 * User-defined custom macros
-* Webcam bridging
 * More complete Moonraker API coverage
 * Better error handling and state reconciliation
 * Enhanced job history tracking
@@ -506,3 +514,15 @@ Contributions are welcome! Please:
 ## License
 
 MIT License — see [LICENSE](LICENSE).
+
+## Development checks
+
+Run the automated suite without printer commands:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Tests use temporary stores for settings, cache, and history writes. Manual MQTT LED diagnostics live under `scripts/diagnostics/` and require an intentional invocation.
+
+See [the compatibility review](research/2026-10-26-compatibility.md) for the latest audit, references, and remaining work.
