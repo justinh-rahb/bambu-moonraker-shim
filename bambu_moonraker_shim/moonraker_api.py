@@ -1576,12 +1576,16 @@ async def _dispatch_jsonrpc(
 
     elif method == "server.webcams.post_item":
         params = request.get("params", {})
+        if "name" in params and (not isinstance(params["name"], str) or not params["name"].strip()):
+            raise DatabaseError(400, "Webcam name must be a nonempty string")
         builtin_webcam = camera_manager.get_builtin_webcam()
         # Load existing
         webcams = database_manager.get_item("moonraker", "webcams") or []
 
         uid = params.get("uid")
         target_cam = None
+        if uid is not None and (not isinstance(uid, str) or not uid.strip()):
+            raise DatabaseError(400, "Webcam UID must be a nonempty string")
 
         # Check if updating existing
         if uid:
@@ -1589,6 +1593,13 @@ async def _dispatch_jsonrpc(
                 if cam["uid"] == uid:
                     target_cam = cam
                     break
+        elif isinstance(params.get("name"), str):
+            matches = [cam for cam in _current_webcams() if cam.get("name") == params["name"]]
+            if len(matches) > 1:
+                raise DatabaseError(409, "Multiple webcams have this name; update by UID or remove the duplicates first")
+            if matches:
+                uid = matches[0]["uid"]
+                target_cam = next((cam for cam in webcams if cam.get("uid") == uid), None)
 
         if target_cam is None and builtin_webcam and uid == builtin_webcam["uid"]:
             target_cam = dict(builtin_webcam)
@@ -1624,7 +1635,9 @@ async def _dispatch_jsonrpc(
             new_cam = target_cam
         else:
             # New webcam
-            uid = str(uuid.uuid4())
+            if not isinstance(params.get("name"), str) or not params["name"].strip():
+                raise DatabaseError(400, "A nonempty name is required for a new webcam")
+            uid = uid or str(uuid.uuid4())
             new_cam = {
                 "name": params.get("name", "New Webcam"),
                 "location": params.get("location", "printer"),
@@ -1650,23 +1663,37 @@ async def _dispatch_jsonrpc(
         response["result"] = {"item": new_cam}
 
     elif method == "server.webcams.delete_item":
-        uid = request.get("params", {}).get("uid")
+        params = request.get("params", {})
+        uid = params.get("uid")
+        name = params.get("name")
+        if uid is not None:
+            if not isinstance(uid, str) or not uid.strip():
+                raise DatabaseError(400, "Webcam UID must be a nonempty string")
+            matches = lambda cam: cam.get("uid") == uid
+        elif isinstance(name, str) and name.strip():
+            # Older clients address cameras by name. Remove all legacy duplicates
+            # with that identity; UID requests always remove just that UID.
+            matches = lambda cam: cam.get("name") == name
+        else:
+            raise DatabaseError(400, "Webcam UID or name required")
         builtin_webcam = camera_manager.get_builtin_webcam()
-        if builtin_webcam and uid == builtin_webcam["uid"]:
-            response["result"] = {"item": {"uid": uid}}
-            return response
+        builtin = next((cam for cam in _current_webcams()
+                        if builtin_webcam and cam.get("uid") == builtin_webcam["uid"]), None)
+        if builtin and matches(builtin):
+            raise DatabaseError(403, "The built-in Bambu Camera cannot be deleted; disable it instead")
         webcams = database_manager.get_item("moonraker", "webcams") or []
 
         # Filter out the one to delete
-        new_list = [cam for cam in webcams if cam["uid"] != uid]
+        removed = [cam for cam in webcams if matches(cam)]
+        new_list = [cam for cam in webcams if not matches(cam)]
 
         if len(new_list) < len(webcams):
             database_manager.post_item("moonraker", "webcams", new_list)
             await notify_webcams_changed()
-            response["result"] = {"item": {"uid": uid}}  # Return deleted ID
+            response["result"] = {"item": removed[0]}
         else:
             # Item not found, but successful deletion (idempotent)
-            response["result"] = {"item": {"uid": uid}}
+            response["result"] = {"item": {"uid": uid} if uid is not None else {"name": name}}
 
     elif method == "server.webcams.test":
         response["result"] = {"can_stream": camera_manager.get_builtin_webcam() is not None}

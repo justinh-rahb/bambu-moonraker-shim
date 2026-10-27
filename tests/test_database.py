@@ -157,6 +157,54 @@ class DatabaseAPITests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(saved['rotation'], 180)
             self.assertTrue(saved['flip_horizontal'])
 
+    async def test_webcam_delete_by_name_removes_legacy_duplicates_and_notifies(self):
+        cameras = [{'uid': 'keep', 'name': 'Webcam'}, {'uid': 'v4l2', 'name': 'V4L2'},
+                   {'uid': 'one', 'name': 'New Webcam'}, {'uid': 'two', 'name': 'New Webcam'}]
+        self.db.post_item('moonraker', 'webcams', cameras)
+        with patch.object(api.manager, 'broadcast', new_callable=unittest.mock.AsyncMock) as notify:
+            result = await self.rpc('server.webcams.delete_item', name='New Webcam')
+            self.assertEqual(result['result']['item']['name'], 'New Webcam')
+            self.assertEqual(self.db.get_item('moonraker', 'webcams'), cameras[:2])
+            event = notify.await_args.args[0]
+            self.assertEqual(event['method'], 'notify_webcams_changed')
+            self.assertFalse(any(cam['name'] == 'New Webcam' for cam in event['params'][0]['webcams']))
+        # Repeating deletion is harmless, but an empty selector must fail.
+        self.assertIn('result', await self.rpc('server.webcams.delete_item', name='New Webcam'))
+        self.assertEqual((await self.rpc('server.webcams.delete_item'))['error']['code'], 400)
+
+    async def test_webcam_uid_delete_only_removes_selected_duplicate(self):
+        cameras = [{'uid': 'one', 'name': 'Same'}, {'uid': 'two', 'name': 'Same'}]
+        self.db.post_item('moonraker', 'webcams', cameras)
+        await self.rpc('server.webcams.delete_item', uid='one', name='Same')
+        self.assertEqual(self.db.get_item('moonraker', 'webcams'), cameras[1:])
+
+    async def test_webcam_post_preserves_client_uid_and_updates_by_name(self):
+        result = await self.rpc('server.webcams.post_item', uid='helix-camera', name='Camera', stream_url='/first')
+        self.assertEqual(result['result']['item']['uid'], 'helix-camera')
+        await self.rpc('server.webcams.post_item', uid='helix-camera', name='Camera', stream_url='/second')
+        await self.rpc('server.webcams.post_item', name='Camera', stream_url='/third')
+        cameras = self.db.get_item('moonraker', 'webcams')
+        self.assertEqual(len(cameras), 1)
+        self.assertEqual(cameras[0]['uid'], 'helix-camera')
+        self.assertEqual(cameras[0]['stream_url'], '/third')
+
+    async def test_unnamed_new_webcams_and_invalid_selectors_are_rejected(self):
+        for params in ({'stream_url': '/stream'}, {'uid': 'new', 'stream_url': '/stream'},
+                       {'name': ''}, {'name': None}, {'name': 'Camera', 'uid': []}):
+            result = await self.rpc('server.webcams.post_item', **params)
+            self.assertEqual(result['error']['code'], 400, result)
+        self.assertIsNone(self.db.get_item('moonraker', 'webcams'))
+
+    async def test_builtin_webcam_name_edit_does_not_create_duplicate_and_delete_is_explicit(self):
+        builtin = {'uid': 'builtin', 'name': 'Bambu Camera', 'stream_url': '/webcam?action=stream',
+                   'snapshot_url': '/webcam?action=snapshot', 'service': 'mjpegstreamer'}
+        with patch.object(api.camera_manager, 'get_builtin_webcam', return_value=builtin):
+            await self.rpc('server.webcams.post_item', name='Bambu Camera', rotation=180, stream_url='bad')
+            self.assertEqual(len(api._current_webcams()), 1)
+            self.assertEqual(api._current_webcams()[0]['stream_url'], builtin['stream_url'])
+            for selector in ({'name': 'Bambu Camera'}, {'uid': 'builtin'}):
+                self.assertEqual((await self.rpc('server.webcams.delete_item', **selector))['error']['code'], 403)
+
     async def test_standard_http_object_queries_filter_fields(self):
         request = Request({'type': 'http', 'method': 'GET', 'path': '/printer/objects/query', 'query_string': b'extruder=temperature,target&print_stats', 'headers': []})
         result = await api.objects_query(request)
