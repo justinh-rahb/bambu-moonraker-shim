@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, List
 import aiomqtt
 from bambu_moonraker_shim.config import Config
 from bambu_moonraker_shim.state_manager import state_manager
+from bambu_moonraker_shim.external_spool import filament_settings, EXTRUSION_PROMPT_ERRORS
 
 class BambuClient:
     def __init__(self):
@@ -55,11 +56,22 @@ class BambuClient:
         self._latest_remaining_time = 0
         self._latest_layer_num = 0
         self._latest_total_layer_num = 0
+        self._reported_print_state: Optional[str] = None
+        self._external_settings: Dict[str, Any] = {}
+        self._external_reported: Dict[str, Any] = {}
+        self._external_pending: Optional[Dict[str, Any]] = None
+        self._external_setting_sequence: Optional[str] = None
+        self._external_rejected: Optional[str] = None
+        self._external_tray_now: Optional[int] = None
+        self._external_tray_target: Optional[int] = None
+        self._multiple_external_spools = False
+        self._external_extrusion_prompt = False
 
     async def start(self):
         """Starts the MQTT loop."""
         if self._loop_task and not self._loop_task.done():
             return
+        await self.restore_external_filament()
         if not self.serial:
              print("Warning: BAMBU_SERIAL not set. Running in mock mode.")
              self._mock_mode = True
@@ -98,6 +110,11 @@ class BambuClient:
                     tls_context=tls_context
                 ) as client:
                     self._mqtt_client = client
+                    self._reported_print_state = None
+                    self._external_tray_now = None
+                    self._external_tray_target = None
+                    self._external_extrusion_prompt = False
+                    await self._external_state({"awaiting_extrusion_confirmation": False})
                     self.connected = True
                     print("Connected to Bambu Printer MQTT!")
                     
@@ -137,6 +154,13 @@ class BambuClient:
                     command_name = data.get("command")
                     if command_name and command_name != "push_status":
                         print(f"MQTT report message: {json.dumps(data)}")
+                    if (command_name == "ams_filament_setting"
+                            and self._external_pending is not None
+                            and str(data.get("sequence_id")) == self._external_setting_sequence
+                            and str(data.get("result", "")).lower() in {"fail", "failed", "error"}):
+                        self._external_rejected = str(data.get("reason") or "Printer rejected filament settings")
+                        self._external_pending = None
+                        await self._external_state({"sync_state": "failed", "last_error": self._external_rejected})
                 await self._parse_telemetry(data)
                 
         except (UnicodeDecodeError, ValueError, TypeError) as exc:
@@ -145,6 +169,7 @@ class BambuClient:
     async def _parse_telemetry(self, data: Dict[str, Any]):
         """Maps Bambu telemetry to Moonraker state."""
         updates = {}
+        await self._parse_external_filament(data)
         now = time.time()
         current_filename = str(data.get("subtask_name") or "")
         current_gcode_file = str(data.get("gcode_file") or "")
@@ -220,6 +245,7 @@ class BambuClient:
         if "gcode_state" in data:
             # IDLE, RUNNING, PAUSE, FINISH, etc.
             bambu_state = data.get("gcode_state", "IDLE")
+            self._reported_print_state = str(bambu_state)
             klipper_state = "standby"
             
             if bambu_state in {"RUNNING", "PREPARE", "SLICING"}:
@@ -380,33 +406,6 @@ class BambuClient:
             paused_seconds += max(0.0, now - self._job_paused_at)
         return max(0.0, (now - self._job_started_at) - paused_seconds)
 
-    def get_live_metadata(self, filename: str) -> Dict[str, Any]:
-        estimated_time = int(round(self._estimated_total_duration()))
-        remaining_time = int(max(0, self._latest_remaining_time))
-        file_size_hint = self._lookup_file_size_hint(filename)
-        filament_total = self._lookup_filament_total_hint(filename)
-        layer_height = 0.2
-        object_height = round(self._latest_total_layer_num * layer_height, 3) if self._latest_total_layer_num else 10.0
-        eta = int(time.time()) + estimated_time if estimated_time > 0 else None
-
-        return {
-            "filename": filename,
-            "size": file_size_hint,
-            "modified": time.time(),
-            "slicer": "BambuStudio",
-            "slicer_version": "unknown",
-            "layer_height": layer_height,
-            "first_layer_height": layer_height,
-            "object_height": object_height,
-            "filament_total": filament_total,
-            "filament_weight_total": filament_total,
-            "estimated_time": estimated_time,
-            "estimated_print_time": estimated_time,
-            "remaining_time": remaining_time,
-            "eta": eta,
-            "thumbnails": [],
-        }
-
     @staticmethod
     def _normalized_filename_key(filename: str) -> str:
         value = os.path.basename(str(filename or "")).strip().lower()
@@ -454,7 +453,7 @@ class BambuClient:
             size_value = int(cached.get("size") or 0)
         except (TypeError, ValueError, AttributeError):
             size_value = 0
-        return max(size_value, 1_000_000)
+        return max(size_value, 0)
 
     def _lookup_filament_total_hint(self, filename: str) -> float:
         cached = self._lookup_cached_file_info(filename)
@@ -462,7 +461,7 @@ class BambuClient:
             filament_total = float(cached.get("filament_total") or 0.0)
         except (TypeError, ValueError, AttributeError):
             filament_total = 0.0
-        return filament_total if filament_total > 0 else 1000.0
+        return max(filament_total, 0.0)
 
     @staticmethod
     def _normalize_fan_ratio(raw_value: Any) -> Optional[float]:
@@ -920,14 +919,216 @@ class BambuClient:
         await self.publish_command(cmd)
         return {"result": "ok"}
 
-    async def load_filament(self) -> Dict[str, Any]:
-        cmd = {"print": {"command": "load_filament"}}
-        await self.publish_command(cmd)
+    async def restore_external_filament(self):
+        from bambu_moonraker_shim.database_manager import database_manager
+
+        saved = database_manager.get_item("bambu_shim", "external_filament")
+        if isinstance(saved, dict) and saved:
+            try:
+                self._external_settings = filament_settings({}, {
+                    "MATERIAL": saved.get("material"), "COLOR": saved.get("color"),
+                    "PROFILE_ID": saved.get("profile_id"), "TEMP_MIN": saved.get("nozzle_temp_min"),
+                    "TEMP_MAX": saved.get("nozzle_temp_max"),
+                })
+            except ValueError as exc:
+                print(f"Ignoring invalid saved external filament: {exc}")
+                return
+            await self._external_state({**self._external_settings, "sync_state": "saved"})
+
+    async def _external_state(self, values):
+        from bambu_moonraker_shim.external_spool import EXTERNAL_MACROS
+
+        await state_manager.update_state({f"gcode_macro {name}": dict(values) for name in EXTERNAL_MACROS})
+
+    async def _parse_external_filament(self, data):
+        # Command echoes are not printer status. Preserve the prompt across deltas.
+        if data.get("command") not in (None, "push_status"):
+            return
+        if "print_error" in data:
+            try:
+                code = int(data["print_error"])
+            except (TypeError, ValueError):
+                code = 0
+            self._external_extrusion_prompt = code in EXTRUSION_PROMPT_ERRORS
+            await self._external_state({
+                "awaiting_extrusion_confirmation": self._external_extrusion_prompt,
+            })
+        tray = data.get("vt_tray")
+        if isinstance(tray, list):
+            self._multiple_external_spools = len(tray) > 1
+            tray = tray[0] if len(tray) == 1 else None
+        if isinstance(tray, dict):
+            reported = {}
+            for source, target in (("tray_type", "material"), ("tray_color", "color"),
+                                   ("tray_info_idx", "profile_id")):
+                if tray.get(source):
+                    reported[target] = str(tray[source]).strip().upper()
+            for field in ("nozzle_temp_min", "nozzle_temp_max"):
+                try:
+                    if field in tray:
+                        reported[field] = int(tray[field])
+                except (TypeError, ValueError):
+                    pass
+            self._external_reported.update(reported)
+            if reported:
+                values = {**self._external_reported, "sync_state": "reported", "last_error": ""}
+                if self._external_rejected:
+                    values.update(sync_state="failed", last_error=self._external_rejected)
+                if self._external_pending:
+                    matches = all(self._external_reported.get(k) == v for k, v in self._external_pending.items())
+                    values["sync_state"] = "confirmed" if matches else "pending"
+                    if matches:
+                        self._external_pending = None
+                await self._external_state(values)
+        ams = data.get("ams")
+        if isinstance(ams, dict) and "tray_tar" in ams:
+            try:
+                self._external_tray_target = int(ams["tray_tar"])
+            except (TypeError, ValueError):
+                self._external_tray_target = None
+        if isinstance(ams, dict) and "tray_now" in ams:
+            try:
+                self._external_tray_now = int(ams["tray_now"])
+            except (TypeError, ValueError):
+                return
+            # Only printer telemetry (or mock mode) changes loaded status.
+            await self._external_state({"loaded": self._external_tray_now == 254})
+
+    def _external_operation_error(self):
+        if not self.connected or (not self._mock_mode and self._mqtt_client is None):
+            return "Printer not connected"
+        model = str(Config.BAMBU_MODEL or "").upper()
+        if self._multiple_external_spools or model.startswith(("H2D", "H2C")):
+            return "External-spool macros currently support one external spool on a single-nozzle printer"
+        if not self._mock_mode and self._reported_print_state not in {"IDLE", "FINISH", "FAILED"}:
+            return "Filament commands require confirmed idle printer telemetry; printing, paused, and unknown states are blocked"
+        if self._mock_mode and self._mock_state in {"printing", "paused"}:
+            return "Filament commands are unavailable during a mock print"
+        if self._external_tray_now is not None and 0 <= self._external_tray_now < 254:
+            return "An AMS tray is active; unload it using the AMS controls first"
+        return None
+
+    async def _publish_external_command(self, fields):
+        """Await transport delivery, without replaying a physical operation.
+
+        QoS 0 avoids the missing PUBACK behavior seen on this P1S. A publish
+        completing is transport success, not confirmation of firmware action.
+        """
+        if self._mock_mode:
+            return
+        command = self._inject_sequence_id({"print": fields})
+        if fields["command"] == "ams_filament_setting":
+            self._external_setting_sequence = command["print"]["sequence_id"]
+        await asyncio.wait_for(self._mqtt_client.publish(
+            f"device/{self.serial}/request", json.dumps(command), qos=0,
+        ), timeout=10)
+
+    async def set_external_filament(self, params) -> Dict[str, Any]:
+        error = self._external_operation_error()
+        if error:
+            return {"error": error}
+        current = {**self._external_settings, **self._external_reported}
+        try:
+            if not current.get("material") and not params.get("MATERIAL"):
+                raise ValueError("MATERIAL is required until the external spool type is known")
+            settings = filament_settings(current, params)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        fields = {
+            "command": "ams_filament_setting", "ams_id": 255, "tray_id": 254, "slot_id": 0,
+            "tray_info_idx": settings["profile_id"], "tray_type": settings["material"],
+            "tray_sub_brands": "", "tray_color": settings["color"],
+            "nozzle_temp_min": settings["nozzle_temp_min"], "nozzle_temp_max": settings["nozzle_temp_max"],
+        }
+        from bambu_moonraker_shim.database_manager import database_manager
+
+        # Persist the request before sending, so it is not lost on a restart.
+        database_manager.post_item("bambu_shim", "external_filament", settings)
+        self._external_settings = settings
+        self._external_pending = None if self._mock_mode else settings
+        self._external_rejected = None
+        try:
+            await self._publish_external_command(fields)
+        except Exception as exc:
+            self._external_pending = None
+            self._external_rejected = str(exc)
+            await self._external_state({**settings, "sync_state": "failed", "last_error": str(exc)})
+            return {"error": f"Filament settings delivery failed: {exc}"}
+        if self._external_rejected:
+            return {"error": self._external_rejected}
+        sync = "mock" if self._mock_mode else ("pending" if self._external_pending else "confirmed")
+        await self._external_state({**settings, "sync_state": sync, "last_error": ""})
         return {"result": "ok"}
 
-    async def unload_filament(self) -> Dict[str, Any]:
-        cmd = {"print": {"command": "unload_filament"}}
-        await self.publish_command(cmd)
+    async def load_filament(self) -> Dict[str, Any]:
+        error = self._external_operation_error()
+        if error:
+            return {"error": error}
+        try:
+            await self._publish_external_command({
+                "command": "ams_change_filament", "ams_id": 255, "slot_id": 254,
+                "target": 254, "curr_temp": -1, "tar_temp": -1,
+            })
+        except Exception as exc:
+            return {"error": f"External load delivery failed: {exc}"}
+        values = {"last_action": "load_requested", "last_error": ""}
+        if self._mock_mode:
+            values["loaded"] = True
+        await self._external_state(values)
+        return {"result": "ok"}
+
+    async def answer_external_extrusion(self, action) -> Dict[str, Any]:
+        error = self._external_operation_error()
+        if error:
+            return {"error": error}
+        if action not in {"done", "resume"}:
+            return {"error": "Invalid external extrusion choice"}
+        if not self._external_extrusion_prompt:
+            return {"error": "Printer is not asking whether filament extruded"}
+        # Unknown tray selection could be an AMS operation; never answer that here.
+        if not self._mock_mode and not (self._external_tray_now == 254 or self._external_tray_target == 254):
+            return {"error": "External spool selection is not confirmed"}
+        try:
+            await self._publish_external_command({"command": "ams_control", "param": action})
+        except Exception as exc:
+            return {"error": f"External load response delivery failed: {exc}"}
+        await self._external_state({
+            "last_action": "extrusion_confirm_requested" if action == "done" else "extrusion_retry_requested",
+            "last_error": "",
+        })
+        # Firmware telemetry clears the question; publish success does not.
+        return {"result": "ok"}
+
+    async def unload_filament(self, temperature=None) -> Dict[str, Any]:
+        error = self._external_operation_error()
+        if error:
+            return {"error": error}
+        settings = {**self._external_settings, **self._external_reported}
+        try:
+            if temperature is None:
+                if not settings:
+                    raise ValueError("Set external filament first or supply TEMP for unloading")
+                temperature = (settings["nozzle_temp_min"] + settings["nozzle_temp_max"]) // 2
+            target = int(temperature)
+            if not 170 <= target <= 300:
+                raise ValueError("TEMP must be 170–300 Celsius")
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"error": str(exc)}
+        nozzle = state_manager.get_object("extruder") or {}
+        try:
+            current = int(round(float(nozzle.get("temperature", 0))))
+            if current < 170:
+                current = target
+            await self._publish_external_command({
+                "command": "ams_change_filament", "ams_id": 255, "slot_id": 255,
+                "target": 255, "curr_temp": current, "tar_temp": target,
+            })
+        except Exception as exc:
+            return {"error": f"External unload delivery failed: {exc}"}
+        values = {"last_action": "unload_requested", "last_error": ""}
+        if self._mock_mode:
+            values["loaded"] = False
+        await self._external_state(values)
         return {"result": "ok"}
 
     async def ams_load_filament(self, tray_id: int, ams_id: int = 0, slot_id: int = 0) -> Dict[str, Any]:

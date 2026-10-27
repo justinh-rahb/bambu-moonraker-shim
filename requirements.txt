@@ -5,3 +5,5 @@ python-multipart
 python-dotenv
 requests
 aiohttp
+
+Pillow>=10

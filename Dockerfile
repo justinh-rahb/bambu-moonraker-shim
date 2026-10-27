@@ -38,13 +38,26 @@ RUN set -eux; \
       exit 1; \
     fi
 
+FROM node:22-alpine AS mainsail-builder
+
+ARG MAINSAIL_VERSION=2.19.0
+ARG MAINSAIL_SOURCE_URL=https://github.com/mainsail-crew/mainsail/archive/refs/tags/v${MAINSAIL_VERSION}.tar.gz
+ARG MAINSAIL_SOURCE_SHA256=19908bcd07804328877cf1843c2436a5c66f66e7c417972a7cd262304057cbd6
+ENV CYPRESS_INSTALL_BINARY=0
+RUN apk add --no-cache curl patch
+WORKDIR /mainsail
+RUN curl -fL "${MAINSAIL_SOURCE_URL}" -o /tmp/mainsail.tar.gz \
+    && echo "${MAINSAIL_SOURCE_SHA256}  /tmp/mainsail.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/mainsail.tar.gz --strip-components=1 \
+    && rm /tmp/mainsail.tar.gz
+RUN npm ci
+COPY docker/mainsail/3mf-support.patch /tmp/3mf-support.patch
+RUN patch -p1 < /tmp/3mf-support.patch && npx vite build
+
 FROM python:3.11-slim
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ARG MAINSAIL_VERSION=2.17.0
-ARG MAINSAIL_SHA256=d010f4df25557d520ccdbb8e42fc381df2288e6a5c72d3838a5a2433c7a31d4e
-ARG MAINSAIL_URL=https://github.com/mainsail-crew/mainsail/releases/download/v${MAINSAIL_VERSION}/mainsail.zip
 ARG FLUIDD_URL=https://github.com/fluidd-core/fluidd/releases/latest/download/fluidd.zip
 ARG FLUIDD_SHA256=
 ARG CNC_UI_REF=main
@@ -64,23 +77,19 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN curl -L -o /tmp/mainsail.zip ${MAINSAIL_URL} \
-    && if [ -n "${MAINSAIL_SHA256}" ]; then echo "${MAINSAIL_SHA256}  /tmp/mainsail.zip" | sha256sum -c -; fi \
-    && rm -rf /usr/share/nginx/html/* \
-    && unzip /tmp/mainsail.zip -d /tmp/mainsail \
+RUN rm -rf /usr/share/nginx/html/* \
     && shopt -s dotglob \
-    && if [ -d /tmp/mainsail/mainsail ]; then mv /tmp/mainsail/mainsail/* /usr/share/nginx/html/; else mv /tmp/mainsail/* /usr/share/nginx/html/; fi \
     && curl -L -o /tmp/fluidd.zip ${FLUIDD_URL} \
     && if [ -n "${FLUIDD_SHA256}" ]; then echo "${FLUIDD_SHA256}  /tmp/fluidd.zip" | sha256sum -c -; fi \
     && rm -rf /usr/share/nginx/fluidd \
     && mkdir -p /usr/share/nginx/fluidd \
     && unzip /tmp/fluidd.zip -d /tmp/fluidd \
     && if [ -d /tmp/fluidd/fluidd ]; then mv /tmp/fluidd/fluidd/* /usr/share/nginx/fluidd/; else mv /tmp/fluidd/* /usr/share/nginx/fluidd/; fi \
-    && rm -rf /tmp/mainsail /tmp/mainsail.zip \
     && rm -rf /tmp/fluidd /tmp/fluidd.zip
 
 COPY . /app
 
+COPY --from=mainsail-builder /mainsail/dist/ /usr/share/nginx/html/
 COPY --from=cnc-builder /out/ /usr/share/nginx/cnc/
 
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf

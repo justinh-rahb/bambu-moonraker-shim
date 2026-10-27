@@ -2,8 +2,11 @@ import asyncio
 import json
 import time
 import secrets
+import shlex
 import uuid
 import os
+import posixpath
+import re
 import tempfile
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Form
@@ -13,9 +16,12 @@ from bambu_moonraker_shim.bambu_client import bambu_client
 from bambu_moonraker_shim.camera_manager import camera_manager
 from bambu_moonraker_shim.config import Config
 from bambu_moonraker_shim.database_manager import DatabaseError, database_manager
+from bambu_moonraker_shim.external_spool import EXTERNAL_MACROS, MATERIAL_PRESETS, EXTERNAL_LOAD_CHOICES
 from bambu_moonraker_shim.fan_control import FanTarget, build_fan_command
 from bambu_moonraker_shim.ftps_client import ftps_client
 from bambu_moonraker_shim.sqlite_manager import get_sqlite_manager
+from bambu_moonraker_shim.file_metadata import MetadataError, validate_filename
+from bambu_moonraker_shim.metadata_service import metadata_service
 
 router = APIRouter()
 
@@ -86,6 +92,13 @@ CONFIG_FILES = {
         ]
     )
 }
+
+
+for _macro_name, _definition in EXTERNAL_MACROS.items():
+    CONFIG_FILES["printer.cfg"] += "\n\n" + "\n".join([
+        f"[gcode_macro {_macro_name}]", f"description: {_definition['description']}", "gcode:",
+        *["  " + line for line in _definition["gcode"].splitlines()],
+    ])
 
 
 def _config_file_listing():
@@ -287,7 +300,7 @@ def _build_file_list(root: str) -> List[Dict[str, Any]]:
             # Filter by extension if desired
             name = f["name"]
             if name.lower().endswith(_GCODE_FILE_SUFFIXES):
-                display_name = _display_filename(name)
+                display_name = name
                 files.append({
                     "path": display_name,
                     "size": f["size"],
@@ -391,10 +404,10 @@ def _cache_has_non_root_entries(entries: Optional[List[Dict[str, Any]]]) -> bool
     return any(not _is_root_direct_child(entry) for entry in entries)
 
 
-def _display_filename(name: str) -> str:
+def _legacy_display_filename(name: str) -> str:
     lower_name = name.lower()
     if lower_name.endswith(".gcode.3mf"):
-        # Mainsail's file browser expects canonical gcode-like filenames.
+        # Compatibility for requests from pre-patch browser tabs.
         return name[:-4]
     return name
 
@@ -491,7 +504,7 @@ def _is_macro_command(command: str) -> bool:
 
 
 def _parse_macro(command: str) -> tuple[str, Dict[str, str]]:
-    parts = command.split()
+    parts = shlex.split(command, comments=False)
     macro_name = parts[0].upper()
     params: Dict[str, str] = {}
     for part in parts[1:]:
@@ -523,6 +536,8 @@ def _normalize_filename(filename: str) -> str:
         and normalized.lower().endswith(".gcode")
         and not normalized.lower().endswith(".gcode.3mf")
     ):
+        if _cached_file_exists(normalized):
+            return normalized
         candidate = f"{normalized}.3mf"
         if _cached_file_exists(candidate):
             return candidate
@@ -616,6 +631,29 @@ async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, An
         print("BED_MESH_CALIBRATE requested; Bambu handles leveling automatically.")
         return {"result": "ok", "action": "bed_mesh_calibrate"}
 
+    if macro_name == "SET_EXTERNAL_FILAMENT":
+        return await bambu_client.set_external_filament(params)
+
+    if macro_name in MATERIAL_PRESETS:
+        if params:
+            return {"error": f"{macro_name} takes no parameters; use SET_EXTERNAL_FILAMENT for custom settings"}
+        return await bambu_client.set_external_filament(dict(MATERIAL_PRESETS[macro_name]))
+
+    if macro_name == "LOAD_EXTERNAL_FILAMENT":
+        if params:
+            return {"error": "LOAD_EXTERNAL_FILAMENT takes no parameters"}
+        return await bambu_client.load_filament()
+
+    if macro_name in EXTERNAL_LOAD_CHOICES:
+        if params:
+            return {"error": f"{macro_name} takes no parameters"}
+        return await bambu_client.answer_external_extrusion(EXTERNAL_LOAD_CHOICES[macro_name])
+
+    if macro_name == "UNLOAD_EXTERNAL_FILAMENT":
+        if set(params) - {"TEMP"}:
+            return {"error": "UNLOAD_EXTERNAL_FILAMENT only accepts TEMP"}
+        return await bambu_client.unload_filament(params.get("TEMP") or None)
+
     if macro_name == "LOAD_FILAMENT":
         has_explicit_ams_params = any(
             key in params for key in ("TRAY_ID", "TRAY", "AMS_ID", "SLOT_ID", "SLOT")
@@ -646,7 +684,7 @@ async def _handle_macro(macro_name: str, params: Dict[str, str]) -> Dict[str, An
         if has_explicit_ams_params:
             result = await bambu_client.ams_unload_filament()
         else:
-            result = await bambu_client.unload_filament()
+            result = await bambu_client.unload_filament(params.get("TEMP") or None)
         if "error" in result:
             return result
         return {"result": "ok", "action": "unload_filament"}
@@ -782,6 +820,7 @@ _GCODE_HELP = {
     "PRINT_START": "Home and set print temperatures", "PRINT_END": "Turn off heaters, fans, and motors",
     "LOAD_FILAMENT": "Load filament", "UNLOAD_FILAMENT": "Unload filament",
     "EXCLUDE_OBJECT": "Skip an object by its numeric identifier",
+    **{name: definition["description"] for name, definition in EXTERNAL_MACROS.items()},
 }
 
 
@@ -873,7 +912,7 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
         return _config_directory_listing(path)
 
     if not Config.BAMBU_SERIAL and path == "gcodes":
-        return _mock_directory_listing(path)
+        return await _directory_metadata(_mock_directory_listing(path), path, extended)
     
     # Determine actua FTPS path to check
     ftps_path = Config.BAMBU_FTPS_UPLOADS_DIR
@@ -924,7 +963,7 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
         else:
             if not _include_gcodes_file_entry(path, f["name"]):
                 continue
-            display_name = _display_filename(f["name"])
+            display_name = f["name"]
             files.append({
                 "filename": display_name,
                 "modified": f["modified"],
@@ -936,7 +975,7 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
     result = {
         "dirs": dirs,
         "files": files,
-        "disk_usage": _get_disk_usage("gcodes"),
+        "disk_usage": await asyncio.to_thread(_get_disk_usage, "gcodes"),
         "root_info": {
             "name": "gcodes",
             "permissions": "rw",
@@ -944,7 +983,7 @@ async def get_directory(path: str = "gcodes", extended: bool = False):
         }
     }
     
-    return success_response(result)
+    return success_response(await _directory_metadata(result, path, extended))
 
 
 @router.post("/server/files/upload")
@@ -977,6 +1016,7 @@ async def file_upload(
             content = await file.read()
             with open(target_path, "wb") as fp:
                 fp.write(content)
+            await asyncio.to_thread(get_sqlite_manager().invalidate_parsed_metadata, os.path.basename(target_path))
 
             print_started = False
             if start_print:
@@ -1017,6 +1057,7 @@ async def file_upload(
             # Invalidate file cache so next list is fresh
             sqlite_manager = get_sqlite_manager()
             sqlite_manager.clear_file_cache()
+            await asyncio.to_thread(sqlite_manager.invalidate_parsed_metadata, file.filename)
             
             # Get file size
             file_size = len(content)
@@ -1052,28 +1093,82 @@ async def file_upload(
 
 
 
-@router.delete("/server/files/gcodes/{filename:path}")
-async def file_delete(filename: str):
-    """Delete a file from the printer via FTPS."""
+class FileOperationError(Exception):
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(message)
+
+
+def _validate_delete_path(path):
+    if not isinstance(path, str) or not path or any(char in path for char in ("\\", "\r", "\n", "\x00")):
+        raise FileOperationError(400, "A valid file path is required")
+    parts = path.split("/")
+    if any(part in {"", ".", ".."} for part in parts) or len(parts) < 2:
+        raise FileOperationError(400, "Expected root/filename without traversal")
+    if parts[0] != "gcodes":
+        raise FileOperationError(403, "Only gcodes files can be deleted")
+    return "/".join(parts[1:])
+
+
+def _resolve_remote_delete(filename):
+    # The old browser aliases foo.gcode.3mf as foo.gcode. Resolve against a
+    # fresh parent listing, preferring an exact file over a legacy alias.
+    parent, basename = posixpath.split(filename)
+    remote_parent = posixpath.join(Config.BAMBU_FTPS_UPLOADS_DIR, parent)
+    entries = ftps_client.list_files(remote_parent)
+    files = {posixpath.basename(entry["name"]) for entry in entries if not entry.get("is_dir")}
+    if basename in files:
+        return filename
+    aliases = [name for name in files if _legacy_display_filename(name) == basename]
+    if len(aliases) == 1:
+        return posixpath.join(parent, aliases[0])
+    if len(aliases) > 1:
+        raise FileOperationError(409, "Ambiguous file alias; use the full filename")
+    raise FileOperationError(404, "File not found")
+
+
+async def _delete_gcode_file(path):
+    filename = _validate_delete_path(path)
+    if state_manager.get_state().get("print_stats", {}).get("state") in {"printing", "paused"}:
+        raise FileOperationError(409, "File deletion is unavailable while printing or paused")
     try:
         if not Config.BAMBU_SERIAL:
-            local_name = os.path.basename(filename)
-            local_path = os.path.join(Config.GCODES_DIR, local_name)
-            if os.path.exists(local_path):
-                os.unlink(local_path)
-            return success_response("ok")
+            root = os.path.realpath(Config.GCODES_DIR)
+            local = os.path.join(root, filename)
+            if os.path.commonpath([root, os.path.realpath(local)]) != root:
+                raise FileOperationError(400, "File path escapes the gcodes root")
+            if os.path.isdir(local):
+                raise FileOperationError(400, "Path is a directory, not a file")
+            await asyncio.to_thread(os.unlink, local)
+        else:
+            target = await asyncio.to_thread(_resolve_remote_delete, filename)
+            await asyncio.to_thread(ftps_client.delete_file, target)
+    except FileOperationError:
+        raise
+    except FileNotFoundError:
+        raise FileOperationError(404, "File not found")
+    except IsADirectoryError:
+        raise FileOperationError(400, "Path is a directory, not a file")
+    except PermissionError:
+        raise FileOperationError(403, "File deletion denied")
+    except Exception as exc:
+        raise FileOperationError(502, f"File deletion failed: {exc}")
+    get_sqlite_manager().clear_file_cache()
+    await asyncio.to_thread(get_sqlite_manager().invalidate_parsed_metadata, filename)
+    if Config.BAMBU_SERIAL and target != filename:
+        await asyncio.to_thread(get_sqlite_manager().invalidate_parsed_metadata, target)
+    result = {"item": {"path": filename, "root": "gcodes", "size": 0, "modified": 0, "permissions": ""},
+              "action": "delete_file"}
+    await manager.broadcast({"jsonrpc": "2.0", "method": "notify_filelist_changed", "params": [result]})
+    return result
 
-        target_name = _normalize_filename(filename)
-        ftps_client.delete_file(target_name)
-        
-        # Invalidate file cache so next list is fresh
-        sqlite_manager = get_sqlite_manager()
-        sqlite_manager.clear_file_cache()
-        
-        return success_response("ok")
-    except Exception as e:
-        print(f"Delete error: {e}")
-        return error_response(500, f"Delete failed: {str(e)}")
+
+@router.delete("/server/files/{root}/{filename:path}")
+async def file_delete(filename: str, root: str = "gcodes"):
+    try:
+        return success_response(await _delete_gcode_file(f"{root}/{filename}"))
+    except FileOperationError as exc:
+        return error_response(exc.code, str(exc))
 
 
 @router.get("/server/files/{root}/{path:path}")
@@ -1088,6 +1183,13 @@ async def file_download(root: str, path: str):
         if content is not None:
             return PlainTextResponse(content)
     if root == "gcodes":
+        if re.fullmatch(r'(?:[^/]+/)*\.thumbs/[a-f0-9]{64}\.(?:png|jpg)', path):
+            key = posixpath.basename(path)
+            payload = await asyncio.to_thread(get_sqlite_manager().get_thumbnail, key)
+            if payload is None:
+                return error_response(404, "Thumbnail not found")
+            return Response(content=payload, media_type="image/png" if key.endswith('.png') else "image/jpeg",
+                            headers={"Cache-Control": "public, max-age=31536000, immutable"})
         if not Config.BAMBU_SERIAL:
             local_name = os.path.basename(path)
             local_path = os.path.join(Config.GCODES_DIR, local_name)
@@ -1119,8 +1221,62 @@ async def file_download(root: str, path: str):
 
 
 @router.get("/server/files/metadata")
-async def file_metadata(filename: str):
-    return success_response(bambu_client.get_live_metadata(filename))
+async def file_metadata(filename: str, plate: Optional[int] = None):
+    try:
+        return success_response(await _read_file_metadata(filename, plate))
+    except MetadataError as exc:
+        return error_response(exc.code, str(exc))
+
+
+async def _read_file_metadata(filename, plate=None, force=False):
+    filename = _normalize_filename(validate_filename(filename))
+    return await metadata_service.get(filename, plate, force, ftps_client, get_sqlite_manager())
+
+
+async def _directory_metadata(result, path, extended):
+    if not extended or not (path == 'gcodes' or path.startswith('gcodes/')):
+        return result
+    parent = path[7:] if path.startswith('gcodes/') else ''
+    async def enrich(item):
+        if not item['filename'].lower().endswith(_GCODE_FILE_SUFFIXES):
+            return item
+        try:
+            metadata = await _read_file_metadata(posixpath.join(parent, item['filename']))
+            return {**item, **{key: value for key, value in metadata.items() if key != 'filename'}}
+        except MetadataError as exc:
+            print(f'Metadata unavailable for {item["filename"]}: {exc}')
+            return item
+    result['files'] = await asyncio.gather(*(enrich(item) for item in result['files']))
+    return result
+
+
+def _thumbnail_details(metadata):
+    parent = posixpath.dirname(metadata['filename'])
+    return [{**{k: v for k, v in thumbnail.items() if k != 'relative_path'},
+             'thumbnail_path': posixpath.join(parent, thumbnail['relative_path'])}
+            for thumbnail in metadata['thumbnails']]
+
+
+@router.get("/server/files/thumbnails")
+async def file_thumbnails(filename: str, plate: Optional[int] = None):
+    try:
+        return success_response(_thumbnail_details(await _read_file_metadata(filename, plate)))
+    except MetadataError as exc:
+        return error_response(exc.code, str(exc))
+
+
+@router.post("/server/files/metascan")
+async def file_metascan(request: Request):
+    try:
+        params = dict(request.query_params)
+        if request.headers.get('content-type', '').startswith('application/json'):
+            params.update(await request.json())
+        plate = int(params['plate']) if params.get('plate') is not None else None
+        return success_response(await _read_file_metadata(params.get('filename'), plate, True))
+    except MetadataError as exc:
+        return error_response(exc.code, str(exc))
+    except (ValueError, TypeError):
+        return error_response(400, 'Invalid metadata scan parameters')
 
 
 @router.get("/server/database/item")
@@ -1328,7 +1484,7 @@ async def handle_jsonrpc(request, connection_id: int):
             response["result"] = _database_request(request["method"], params)
         else:
             response = await _dispatch_jsonrpc(request, connection_id)
-    except DatabaseError as exc:
+    except (DatabaseError, FileOperationError, MetadataError) as exc:
         response["error"] = {"code": exc.code, "message": str(exc)}
     except (ValueError, TypeError, KeyError) as exc:
         response["error"] = {"code": -32602, "message": str(exc)}
@@ -1360,9 +1516,11 @@ async def _dispatch_jsonrpc(
         include_monitors = request.get("params", {}).get("include_monitors", False)
         response["result"] = state_manager.get_temperature_history(include_monitors)
 
-    elif method == "server.files.metadata":
-        filename = request.get("params", {}).get("filename")
-        response["result"] = bambu_client.get_live_metadata(filename)
+    elif method in {"server.files.metadata", "server.files.metascan", "server.files.thumbnails"}:
+        params = request.get("params", {})
+        response["result"] = await _read_file_metadata(params.get("filename"), params.get('plate'), method.endswith('metascan'))
+        if method.endswith('thumbnails'):
+            response['result'] = _thumbnail_details(response['result'])
 
     elif method == "printer.info":
         response["result"] = {
@@ -1849,6 +2007,9 @@ async def _dispatch_jsonrpc(
         else:
             response["result"] = "ok"
 
+    elif method == "server.files.delete_file":
+        response["result"] = await _delete_gcode_file(request.get("params", {}).get("path"))
+
     elif method == "server.files.roots":
         response["result"] = _file_roots_payload()
 
@@ -1872,7 +2033,7 @@ async def _dispatch_jsonrpc(
             return response
 
         if not Config.BAMBU_SERIAL and path == "gcodes":
-            response["result"] = _mock_directory_listing(path)
+            response["result"] = await _directory_metadata(_mock_directory_listing(path), path, params.get('extended', False))
             return response
         
         # Determine actual FTPS path to check
@@ -1933,7 +2094,7 @@ async def _dispatch_jsonrpc(
             else:
                 if not _include_gcodes_file_entry(path, f["name"]):
                     continue
-                display_name = _display_filename(f["name"])
+                display_name = f["name"]
                 files.append({
                     "filename": display_name,
                     "modified": f["modified"],
@@ -1945,13 +2106,14 @@ async def _dispatch_jsonrpc(
         response["result"] = {
             "dirs": dirs,
             "files": files,
-            "disk_usage": _get_disk_usage("gcodes"),
+            "disk_usage": await asyncio.to_thread(_get_disk_usage, "gcodes"),
             "root_info": {
                 "name": "gcodes", # Always the root name, even for subdirs
                 "permissions": "rw",
                 "path": "gcodes",
             }
         }
+        response['result'] = await _directory_metadata(response['result'], path, params.get('extended', False))
 
     elif method == "server.history.list":
         # Get job history from SQLite

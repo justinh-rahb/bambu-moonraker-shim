@@ -1,4 +1,5 @@
 import ftplib
+import calendar
 import re
 import socket
 import ssl
@@ -7,6 +8,10 @@ import time
 from typing import Any, Dict, List, Optional
 
 from bambu_moonraker_shim.config import Config
+
+
+class DownloadLimitError(ValueError):
+    pass
 
 
 class ImplicitFTP_TLS(ftplib.FTP_TLS):
@@ -110,6 +115,8 @@ class BambuFTPSClient:
             except Exception as exc:
                 last_error = exc
                 self._reset_connection()
+                if isinstance(exc, DownloadLimitError):
+                    raise
                 if attempt >= len(self._retry_delays_seconds):
                     break
                 delay = self._retry_delays_seconds[attempt]
@@ -179,11 +186,11 @@ class BambuFTPSClient:
                     continue
                 is_dir = facts.get("type") == "dir"
                 size = int(facts.get("size", 0))
-                modified = time.time()
+                modified = 0
                 modified_raw = facts.get("modify")
                 if modified_raw:
                     try:
-                        modified = time.mktime(time.strptime(modified_raw, "%Y%m%d%H%M%S"))
+                        modified = calendar.timegm(time.strptime(modified_raw.split('.')[0], "%Y%m%d%H%M%S"))
                     except Exception:
                         pass
                 files.append(
@@ -215,7 +222,7 @@ class BambuFTPSClient:
                         "name": name,
                         "is_dir": is_dir,
                         "size": size,
-                        "modified": time.time(),
+                        "modified": 0,
                     }
                 )
 
@@ -252,21 +259,25 @@ class BambuFTPSClient:
             lambda: self._upload_file_once(local_path, remote_filename),
         )
 
-    def _download_file_once(self, remote_path: str) -> bytes:
+    def _download_file_once(self, remote_path: str, max_size=None) -> bytes:
         self.connect()
         target = self._build_remote_path(remote_path)
         print(f"Downloading {target}...")
         data = bytearray()
+        def receive(block):
+            if max_size is not None and len(data) + len(block) > max_size:
+                raise DownloadLimitError('File exceeds metadata download limit')
+            data.extend(block)
         try:
-            self.ftp.retrbinary(f"RETR {target}", data.extend)
+            self.ftp.retrbinary(f"RETR {target}", receive)
         except ftplib.error_perm as exc:
             if "550" in str(exc):
                 raise FileNotFoundError(target) from exc
             raise
         return bytes(data)
 
-    def download_file(self, remote_path: str) -> bytes:
-        return self._with_retry("download_file", lambda: self._download_file_once(remote_path))
+    def download_file(self, remote_path: str, max_size=None) -> bytes:
+        return self._with_retry("download_file", lambda: self._download_file_once(remote_path, max_size))
 
     def _delete_file_once(self, remote_filename: str):
         self.connect()

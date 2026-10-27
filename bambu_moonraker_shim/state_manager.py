@@ -2,6 +2,7 @@ import time
 import uuid
 from typing import Dict, Any, List, Optional
 from bambu_moonraker_shim.config import model_supports_chamber_temperature
+from bambu_moonraker_shim.external_spool import EXTERNAL_MACROS, macro_variables
 
 class StateManager:
     def __init__(self):
@@ -152,6 +153,11 @@ class StateManager:
                 "state_message": "Printer is ready"
             }
         }
+        for name, definition in EXTERNAL_MACROS.items():
+            self._state[f"gcode_macro {name}"] = macro_variables()
+            self._state["gcode"]["commands"][name] = {"help": definition["description"]}
+            for section in ("settings", "config"):
+                self._state["configfile"][section][f"gcode_macro {name.lower()}"] = dict(definition)
         if not self._has_chamber_temperature:
             self._disable_chamber_temperature_state()
 

@@ -1,0 +1,112 @@
+--- a/src/store/variables.ts
++++ b/src/store/variables.ts
+@@ -36,7 +36,7 @@
+ /*
+  * List of valid gcode file extensions
+  */
+-export const validGcodeExtensions = ['.gcode', '.g', '.gco', '.ufp', '.nc']
++export const validGcodeExtensions = ['.gcode', '.g', '.gco', '.ufp', '.nc', '.3mf']
+ 
+ /*
+  * List of initable server components
+--- a/src/store/files/getters.ts
++++ b/src/store/files/getters.ts
+@@ -77,7 +77,7 @@
+                 if (file.isDirectory) return true
+ 
+                 const pos = file.filename.lastIndexOf('.')
+-                const extension = file.filename.slice(pos)
++                const extension = file.filename.slice(pos).toLowerCase()
+ 
+                 return validGcodeExtensions.includes(extension)
+                 // END filter != gcode files or dirs
+--- a/src/store/files/actions.ts
++++ b/src/store/files/actions.ts
+@@ -216,7 +216,7 @@
+                 await commit('setMoveFile', payload)
+                 if (
+                     payload.item.root === 'gcodes' &&
+-                    validGcodeExtensions.includes(payload.item.path.slice(payload.item.path.lastIndexOf('.')))
++                    validGcodeExtensions.includes(payload.item.path.slice(payload.item.path.lastIndexOf('.')).toLowerCase())
+                 ) {
+                     await dispatch('requestMetadata', [
+                         {
+--- a/src/components/TheFullscreenUpload.vue
++++ b/src/components/TheFullscreenUpload.vue
+@@ -83,7 +83,7 @@
+ 
+             for (const file of files) {
+                 const extensionPos = file.name.lastIndexOf('.')
+-                const extension = file.name.slice(extensionPos)
++                const extension = file.name.slice(extensionPos).toLowerCase()
+                 const isGcode = validGcodeExtensions.includes(extension)
+ 
+                 let path = ''
+--- a/src/components/panels/Gcodefiles/GcodefilesPanelTableRowFile.vue
++++ b/src/components/panels/Gcodefiles/GcodefilesPanelTableRowFile.vue
+@@ -78,7 +78,7 @@
+                     <v-icon class="mr-1">{{ mdiFire }}</v-icon>
+                     {{ $t('Files.Preheat') }}
+                 </v-list-item>
+-                <v-list-item :disabled="!isGcodeFile" @click="view3D">
++                <v-list-item :disabled="!isGcodeFile || is3mfFile" @click="view3D">
+                     <v-icon class="mr-1">{{ mdiVideo3d }}</v-icon>
+                     {{ $t('Files.View3D') }}
+                 </v-list-item>
+@@ -90,7 +90,7 @@
+                     <v-icon class="mr-1">{{ mdiCloudDownload }}</v-icon>
+                     {{ $t('Files.Download') }}
+                 </v-list-item>
+-                <v-list-item @click="editFile">
++                <v-list-item :disabled="is3mfFile" @click="editFile">
+                     <v-icon class="mr-1">{{ mdiFileDocumentEditOutline }}</v-icon>
+                     {{ $t('Files.EditFile') }}
+                 </v-list-item>
+@@ -190,9 +190,13 @@
+     @Prop({ type: Function, required: true }) readonly select!: (value: boolean) => void
+ 
+     get isGcodeFile() {
+-        const format = this.item.filename.slice(this.item.filename.lastIndexOf('.'))
++        const format = this.item.filename.slice(this.item.filename.lastIndexOf('.')).toLowerCase()
+ 
+         return validGcodeExtensions.includes(format)
++    }
++
++    get is3mfFile() {
++        return this.item.filename.toLowerCase().endsWith('.3mf')
+     }
+ 
+     get printStatusTextColor() {
+--- a/src/store/files/mutations.ts
++++ b/src/store/files/mutations.ts
+@@ -3,7 +3,7 @@
+ import { findDirectory } from '@/plugins/helpers'
+ import { MutationTree } from 'vuex'
+ import { FileState, FileStateFile } from '@/store/files/types'
+-import { allowedMetadata } from '@/store/variables'
++import { allowedMetadata, validGcodeExtensions } from '@/store/variables'
+ 
+ export const mutations: MutationTree<FileState> = {
+     reset(state) {
+@@ -89,8 +89,8 @@
+                 parent[indexFile].metadataRequested = false
+                 parent[indexFile].metadataPulled = false
+ 
+-                const extension = filename.substring(filename.lastIndexOf('.') + 1)
+-                if (payload.item.root === 'gcodes' && extension === 'gcode') {
++                const extension = filename.slice(filename.lastIndexOf('.')).toLowerCase()
++                if (payload.item.root === 'gcodes' && validGcodeExtensions.includes(extension)) {
+                     Vue.$socket.emit(
+                         'server.files.metadata',
+                         { filename: payload.item.path },
+--- a/src/components/panels/Gcodefiles/GcodefilesPanelTableRowFileMetadata.vue
++++ b/src/components/panels/Gcodefiles/GcodefilesPanelTableRowFileMetadata.vue
+@@ -27,7 +27,7 @@
+                 return formatFilesize(value)
+ 
+             case 'date':
+-                return this.formatDateTime(value)
++                return value instanceof Date && value.getTime() === 0 ? '--' : this.formatDateTime(value)
+ 
+             case 'time':
+                 return formatPrintTime(value)

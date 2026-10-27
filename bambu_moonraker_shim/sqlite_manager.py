@@ -1,7 +1,7 @@
 """
 SQLite database manager for file caching, metadata, and job history.
 Handles structured data that benefits from queries and indexing.
-UI configuration still uses database_manager.py (JSON-based).
+UI namespace storage is managed by database_manager.py in the same SQLite file.
 """
 
 import os
@@ -78,6 +78,12 @@ class SQLiteManager:
                 )
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_start_time ON job_history(start_time DESC)")
+            cursor.execute("""CREATE TABLE IF NOT EXISTS parsed_file_metadata (
+                filename TEXT NOT NULL, plate INTEGER NOT NULL, parser_version INTEGER NOT NULL,
+                source_size INTEGER NOT NULL, source_modified REAL NOT NULL, metadata TEXT NOT NULL,
+                PRIMARY KEY (filename, plate))""")
+            cursor.execute("""CREATE TABLE IF NOT EXISTS file_thumbnails (
+                key TEXT PRIMARY KEY, data BLOB NOT NULL)""")
             
             conn.commit()
     
@@ -199,6 +205,9 @@ class SQLiteManager:
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            parsed = cursor.execute("SELECT metadata FROM parsed_file_metadata WHERE filename=? AND plate IN (0,1) ORDER BY plate LIMIT 1", (filename,)).fetchone()
+            if parsed:
+                return json.loads(parsed['metadata'])
             cursor.execute("""
                 SELECT * FROM file_metadata WHERE filename = ?
             """, (filename,))
@@ -220,6 +229,37 @@ class SQLiteManager:
                 'thumbnails': json.loads(row['thumbnails']) if row['thumbnails'] else []
             }
     
+    def get_parsed_metadata(self, filename, plate, version, size, modified):
+        with self.get_connection() as conn:
+            row = conn.execute("""SELECT metadata FROM parsed_file_metadata WHERE
+                filename=? AND plate IN (?,?) AND parser_version=? AND source_size=? AND source_modified=? ORDER BY plate LIMIT 1""",
+                (filename, plate, 1 if plate == 0 else plate, version, size, modified)).fetchone()
+            return json.loads(row['metadata']) if row else None
+
+    def cache_parsed_metadata(self, filename, plate, version, metadata, thumbnails):
+        with self.get_connection() as conn:
+            for key, data in thumbnails.items():
+                conn.execute("INSERT OR IGNORE INTO file_thumbnails VALUES (?, ?)", (key, data))
+            conn.execute("INSERT OR REPLACE INTO parsed_file_metadata VALUES (?, ?, ?, ?, ?, ?)",
+                         (filename, plate, version, metadata['size'], metadata['modified'], json.dumps(metadata, allow_nan=False)))
+            self._prune_thumbnails(conn)
+
+    @staticmethod
+    def _prune_thumbnails(conn):
+        conn.execute("""DELETE FROM file_thumbnails WHERE NOT EXISTS
+            (SELECT 1 FROM parsed_file_metadata WHERE instr(metadata, file_thumbnails.key) > 0)""")
+
+    def invalidate_parsed_metadata(self, filename):
+        with self.get_connection() as conn:
+            conn.execute("DELETE FROM parsed_file_metadata WHERE filename=?", (filename,))
+            conn.execute("DELETE FROM file_metadata WHERE filename=?", (filename,))
+            self._prune_thumbnails(conn)
+
+    def get_thumbnail(self, key):
+        with self.get_connection() as conn:
+            row = conn.execute("SELECT data FROM file_thumbnails WHERE key=?", (key,)).fetchone()
+            return bytes(row['data']) if row else None
+
     # === Job History Methods ===
     
     def add_job(self, job_data: Dict[str, Any]) -> int:

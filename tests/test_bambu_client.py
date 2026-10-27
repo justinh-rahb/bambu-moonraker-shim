@@ -140,22 +140,19 @@ class BambuClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_ams_load_unload_commands(self):
         client = BambuClient()
         client.connected = True
+        client._reported_print_state = "IDLE"
         client._mqtt_client = AsyncMock()
-        client.publish_command = AsyncMock()
-
-        result = await client.load_filament()
-        self.assertEqual(result, {"result": "ok"})
-        self.assertEqual(
-            client.publish_command.await_args_list[0].args[0],
-            {"print": {"command": "load_filament"}},
-        )
-
-        result = await client.unload_filament()
-        self.assertEqual(result, {"result": "ok"})
-        self.assertEqual(
-            client.publish_command.await_args_list[1].args[0],
-            {"print": {"command": "unload_filament"}},
-        )
+        with patch.object(state_manager, "update_state", AsyncMock()):
+            self.assertEqual(await client.load_filament(), {"result": "ok"})
+            self.assertEqual(await client.unload_filament(260), {"result": "ok"})
+        messages = [json.loads(call.args[1])["print"] for call in client._mqtt_client.publish.await_args_list]
+        self.assertEqual(messages[0]["command"], "ams_change_filament")
+        self.assertEqual(messages[0]["ams_id"], 255)
+        self.assertEqual(messages[0]["slot_id"], 254)
+        self.assertEqual(messages[0]["target"], 254)
+        self.assertEqual(messages[1]["slot_id"], 255)
+        self.assertEqual(messages[1]["target"], 255)
+        self.assertEqual(messages[1]["tar_temp"], 260)
 
     async def test_start_print_h2d_converts_calibration_fields_to_ints(self):
         client = BambuClient()
@@ -264,30 +261,10 @@ class BambuClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updates["print_stats"]["info"]["total_layer"], 256)
         self.assertAlmostEqual(updates["print_stats"]["print_duration"], 849.032, places=2)
         self.assertAlmostEqual(updates["print_stats"]["total_duration"], 849.032, places=2)
-        self.assertEqual(updates["print_stats"]["filament_used"], 70.0)
+        self.assertNotIn("filament_used", updates["print_stats"])
         self.assertEqual(updates["display_status"]["progress"], 0.07)
-        self.assertEqual(updates["virtual_sdcard"]["file_position"], 70000)
+        self.assertEqual(updates["virtual_sdcard"]["file_position"], 0)
 
-    def test_live_metadata_uses_running_job_remaining_time(self):
-        client = BambuClient()
-        client._active_job_filename = "open back"
-        client._active_gcode_file = "open back.3mf"
-        client._latest_remaining_time = 188 * 60
-        client._job_started_at = 100.0
-        client._latest_total_layer_num = 256
-
-        with patch.object(state_manager, "get_state", return_value={"print_stats": {"filename": "open back"}}), patch(
-            "bambu_moonraker_shim.bambu_client.time.time",
-            return_value=160.0,
-        ):
-            metadata = client.get_live_metadata("open back.3mf")
-
-        self.assertEqual(metadata["estimated_time"], 11340)
-        self.assertEqual(metadata["estimated_print_time"], 11340)
-        self.assertEqual(metadata["remaining_time"], 11280)
-        self.assertEqual(metadata["eta"], 11500)
-        self.assertEqual(metadata["size"], 1000000)
-        self.assertEqual(metadata["slicer"], "BambuStudio")
 
 
 if __name__ == "__main__":

@@ -1,294 +1,62 @@
-> [!WARNING] 
-> **DISCLAIMER**
->
-> This project is an **unofficial, experimental shim** that communicates with Bambu Lab printers using their documented and undocumented LAN interfaces.
->
-> - This is **NOT** supported by Bambu Lab.
-> - This project may break with firmware updates.
-> - There is **NO WARRANTY** of safety, correctness, or fitness for any purpose.
-> - You are responsible for **anything that happens to your printer** while using this software.
->
-> By using this project, you acknowledge that you are doing so **at your own risk**.
-> If that makes you uncomfortable, this project is not for you.
-
 # Bambu Moonraker Shim
 
-A lightweight shim that bridges **Bambu Lab printers** (P1 / X1 / A1 series) to **Mainsail** (and potentially other Moonraker clients) by emulating a **subset** of the Moonraker API.
+An experimental LAN bridge between Bambu Lab printers and Moonraker clients such as Mainsail and Fluidd. It translates a subset of Moonraker requests into Bambu MQTT and FTPS operations without installing Klipper or replacing printer firmware.
 
-This allows you to use the Mainsail UI to **monitor and partially control** a Bambu printer **without rooting it, flashing firmware, or installing Klipper**.
+The current development printer is a **P1S**. Model-specific code exists for other printers, but that does not establish hardware compatibility across the P1, X1, A1, P2S or H2 families.
+
+> This project is unofficial and unsupported by Bambu Lab. Printer firmware changes may break it. It is provided without warranty; physical controls require validation on your printer.
 
 ![Shambu](docs/screenshot.png)
 
-## What This Project Is (and Is Not)
+## Current status
 
-**This is:**
+“Implemented” means there is a code path, not that every printer has accepted the command. Automated and mock tests cannot confirm heater, motion or print behavior on hardware.
 
-* A protocol shim
-* A compatibility layer
-* A "Moonraker impersonator" that translates requests to Bambu's LAN MQTT / FTPS interfaces
+| Area | Current behavior | Validation and limits |
+| --- | --- | --- |
+| Connection and monitoring | LAN MQTT, reconnect snapshots, temperatures, print state/progress and filename | Observed on the development P1S. Not a model compatibility matrix. |
+| Camera | Shared P1-style camera connection, MJPEG stream and snapshots | Observed on P1S; this is not a general RTSP camera implementation. |
+| UI settings | Transactional SQLite storage through the Moonraker database API | HTTP/WebSocket saves, restart persistence and unchanged legacy JSON verified. |
+| File browser | FTPS listing/download/upload/delete, real `.gcode.3mf` filenames | Live listing verified. Upload/delete flows tested with disposable mock files and mocked FTPS; printer acceptance still needs observation. |
+| Print control | Start, pause, resume and cancel command paths | Controlled hardware acceptance tests remain pending. A successful API response is not printer confirmation. |
+| Heaters and motion | Heater targets, homing, XYZ jogs, motor disable, fans, light and speed modes | Implemented; preserve the established heater-command choices until observed testing resolves firmware behavior. |
+| External spool | Material presets, custom metadata, native load/unload requests | Payloads, persistence and UI tested; physical operations remain unverified. |
+| File metadata and previews | Parse sliced 3MF and common plain G-code comments; persist previews in SQLite | Benchy archive verified locally and stored printer files verified through read-only FTPS; missing fields are omitted. See format and cache limits below. |
+| History | Persistent terminal job records and progress estimates | Active jobs do not survive shim restarts intact. Filament consumption derived from progress remains an estimate. |
 
-**This is not:**
+The Docker image bundles **Mainsail 2.19.0**, Fluidd, moonraker-cnc, the shim and Nginx. Mainsail has a build-time patch for 3MF files. Fluidd and CNC are fetched from their configured upstream URLs; their default references are not pinned to releases.
 
-* Klipper
-* A firmware replacement
-* A complete Moonraker implementation
-* Endorsed or supported by Bambu Lab
+## Quick start with Docker
 
-## Features (Current State)
-
-### Connection
-
-* Connects to Bambu printers over **LAN MQTT**
-* Supports **LAN mode**
-
-### Monitoring (Working)
-
-* Live temperature **display**:
-  * Extruder
-  * Bed
-* Print state:
-  * Ready
-  * Printing
-  * Paused
-  * Complete
-* Job progress
-* Currently loaded filename
-* Built-in P1/A1 camera bridge (MJPEG and snapshots)
-* Persistent Mainsail/Fluidd settings through the Moonraker database API
-
-### Control (Working)
-
-* **Print control**:
-  * Pause / Resume / Cancel prints
-* **Temperature control**:
-  * Set bed temperature (M190 / Moonraker commands)
-  * Set extruder temperature (M109 / Moonraker commands)
-  * Set chamber temperature (M191 / Moonraker commands)
-* **Klipper macro support**:
-  * `PRINT_START` / `START_PRINT` (with bed/hotend/chamber parameters)
-  * `PRINT_END` / `END_PRINT`
-  * `PAUSE` / `RESUME` / `CANCEL_PRINT`
-  * `BED_MESH_CALIBRATE` (accepted, auto-leveling is automatic)
-* Manual G-code command sending (limited)
-* XYZ movement
-* Homing
-* Fan control:
-  * Part cooling
-  * Auxiliary
-  * Chamber / exhaust
-* Chamber LED on / off
-
-### Files (Partial / Experimental)
-
-* Mainsail file browser compatibility (`gcodes` + `config` roots)
-* File listing (via printer FTPS)
-* File upload (via FTPS)
-* File deletion (via FTPS)
-* File download endpoint for `gcodes` (local in mock mode, FTPS-backed with printer)
-
-## What Does NOT Work (Yet)
-
-* ❌ Full interactive G-code console
-* ❌ Custom user-defined Klipper macros
-* ❌ Job queueing
-* ❌ Full Moonraker API parity
-
-If you are expecting a drop-in Klipper replacement, this is not that.
-
-## Prerequisites
-
-* **Python 3.9+**
-* **Mainsail**
-* **Bambu Lab printer**:
-  * P1P
-  * P1S
-  * X1 / X1C / X1E
-  * A1 / A1 Mini (experimental)
-
-## Installation
-
-1. **Clone the repository**
-
-   ```bash
-   git clone https://github.com/justinh-rahb/bambu-moonraker-shim.git
-   cd bambu-moonraker-shim
-   ```
-
-2. **Create a virtual environment (recommended)**
-
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # Windows: venv\Scripts\activate
-   ```
-
-3. **Install dependencies**
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## Configuration
-
-Create a `.env` file in the project root:
+Requirements: Docker, a printer reachable from the container, its LAN access code and serial number. The API currently has no authentication and is intended for a trusted LAN.
 
 ```bash
-# Bambu Printer Config
+git clone https://github.com/justinh-rahb/bambu-moonraker-shim.git
+cd bambu-moonraker-shim
+```
+
+Create `.env` in the repository root, replacing the example values:
+
+```dotenv
 BAMBU_HOST=192.168.1.100
 BAMBU_ACCESS_CODE=12345678
 BAMBU_SERIAL=01P00A12345678
 BAMBU_MODEL=P1S
-
-# Connection Mode
 BAMBU_MODE=local
-
-# Server Config
-HTTP_PORT=7125
-LOG_LEVEL=INFO
-GCODES_DIR=gcodes
-
-# FTPS Settings (for file operations)
 BAMBU_FTPS_UPLOADS_DIR=/
 ```
 
-### Configuration Notes
+`BAMBU_MODEL` is a model hint, not capability detection. Set it to the actual model. P1/A1 hints hide chamber temperature objects. The documented workflow is LAN mode; cloud environment variables in the source are not a supported cloud setup guide.
 
-* **BAMBU_HOST**: Your printer's IP address (find in printer settings)
-* **BAMBU_ACCESS_CODE**: LAN access code (displayed on printer screen)
-* **BAMBU_SERIAL**: Printer serial number (displayed on printer screen)
-* **BAMBU_MODEL**: Optional model hint (`H2D`, `P2S`, `N7`, `A1`, `A1 Mini`) for model-specific behavior. `P1*`/`A1*` models hide chamber temperature objects in Mainsail.
-* **BAMBU_MODE**: Use `local` for LAN-only mode (recommended)
-
-## Usage
-
-1. **Start the shim**
-
-   ```bash
-   python main.py
-   ```
-
-2. **Configure Mainsail**
-
-   * Open Mainsail
-   * Go to **Settings → Printers**
-   * Add a new printer
-   * Set the URL to the machine running the shim (e.g. `http://192.168.1.50:7125`)
-
-3. **Connect**
-
-   * Mainsail should connect
-   * The printer should appear as Ready / Printing
-   * Temperatures and basic controls should function
-
-## Docker
-
-A Docker image is provided that bundles:
-
-* This shim
-* Mainsail UI
-* Fluidd UI
-* moonraker-cnc UI
-* Nginx reverse proxy
-
-### Build
-
-```bash
-docker build -t bambu-moonraker-shim .
-```
-
-Optional pinning for deterministic UI assets:
-
-```bash
-docker build -t bambu-moonraker-shim \
-  --build-arg MAINSAIL_URL="https://github.com/mainsail-crew/mainsail/releases/download/v2.17.0/mainsail.zip" \
-  --build-arg MAINSAIL_SHA256="d010f4df25557d520ccdbb8e42fc381df2288e6a5c72d3838a5a2433c7a31d4e" \
-  --build-arg FLUIDD_URL="https://github.com/fluidd-core/fluidd/releases/download/v<fluidd-version>/fluidd.zip" \
-  --build-arg FLUIDD_SHA256="<fluidd-zip-sha256>" \
-  --build-arg CNC_UI_URL="https://github.com/justinh-rahb/moonraker-cnc/archive/56061199fb319d06fff9076f3895fd1e789d7587.zip" \
-  --build-arg CNC_UI_SHA256="<cnc-ui-zip-sha256>" \
-  .
-```
-
-### Run
-
-```bash
-docker run \
-  --env-file .env \
-  -p 8080:80 \
-  -p 8081:81 \
-  -p 8082:82 \
-  -v "$PWD/bambu_shim.db:/app/bambu_shim.db" \
-  -v "$PWD/moonraker.json:/app/moonraker.json" \
-  bambu-moonraker-shim
-```
-
-Access UIs at:
-
-```
-Mainsail: http://localhost:8080
-Fluidd:   http://localhost:8081
-CNC UI:   http://localhost:8082
-```
-
-### Networking Notes
-
-The container **must be able to reach the printer IP directly**.
-
-If bridge networking causes issues, use host mode:
-
-```bash
-docker run \
-  --env-file .env \
-  --network host \
-  -v "$PWD/bambu_shim.db:/app/bambu_shim.db" \
-  -v "$PWD/moonraker.json:/app/moonraker.json" \
-  bambu-moonraker-shim
-```
-
-Access Mainsail at:
-
-```
-http://localhost
-```
-
-Access Fluidd at:
-
-```
-http://localhost:81
-```
-
-Access moonraker-cnc UI at:
-
-```
-http://localhost:82
-```
-
-### Persistent Data
-
-The bind mounts above persist runtime data across container restarts:
-
-* `bambu_shim.db` - authoritative SQLite store for UI settings, webcams, file cache, metadata, and job history.
-* `moonraker.json` - legacy settings import source. It is imported once when the SQLite settings store is initialized and is then left untouched. Keep the mount during an upgrade so existing settings are imported.
-
-Settings writes use SQLite transactions, including concurrent saves from Mainsail and Fluidd. Keep the `bambu_shim.db` mount: new settings are no longer written to `moonraker.json`. Back up SQLite with its backup API (or stop the container before copying the database).
-
-The Moonraker database item/list API is supported over HTTP, WebSocket JSON-RPC, and `POST /server/jsonrpc`. String keys use dots for nested fields; array keys preserve literal dots, such as filenames. Missing items return 404, while stored JSON `null` returns success. POST requires `key` and `value`; DELETE returns the removed value. Internal namespaces are read-only through the public database API. Maintenance entries are persisted normally.
-
-This is Moonraker API compatibility; the database file is a shim database, not a native Moonraker database replacement. Database backup/restore HTTP endpoints are not implemented.
-
-Optional paths: `SHIM_DB_PATH` selects the SQLite store, and `MOONRAKER_DB_PATH` selects the legacy JSON import source. Defaults match the mounts above. A malformed non-empty import file stops startup with an error instead of silently losing settings. Repair the source and restart; failed imports are retried.
-
-Create files once if needed:
+Create the persistence files **before** mounting them. `touch` preserves existing contents; do not replace an existing JSON file or database:
 
 ```bash
 touch bambu_shim.db moonraker.json
-```
-
-### Mock Mode (No Printer)
-
-To run in mock mode (no `BAMBU_SERIAL` / no `.env`), start without `--env-file`:
-
-```bash
-docker run \
+docker build -t bambu-moonraker-shim .
+docker run -d \
+  --name fakeraker \
+  --env-file .env \
+  -p 7125:7125 \
   -p 8080:80 \
   -p 8081:81 \
   -p 8082:82 \
@@ -297,232 +65,249 @@ docker run \
   bambu-moonraker-shim
 ```
 
-## Fan Control
+| Service | Address |
+| --- | --- |
+| Mainsail | <http://localhost:8080> |
+| Fluidd | <http://localhost:8081> |
+| moonraker-cnc | <http://localhost:8082> |
+| Moonraker-compatible API | <http://localhost:7125> |
 
-The shim maps Mainsail fan controls to Bambu's MQTT G-code interface:
+The bundled UIs connect through Nginx. Port 7125 provides direct API access for other clients and the configuration helper below. Docker's supervisor fixes the internal API port at 7125; `HTTP_PORT` only changes the `python main.py` development server.
 
-| Fan       | G-code    | Description           |
-| --------- | --------- | --------------------- |
-| `part`    | `M106 P1` | Part cooling fan      |
-| `aux`     | `M106 P2` | Auxiliary fan         |
-| `chamber` | `M106 P3` | Chamber / exhaust fan |
+Inspect startup and connection errors with:
 
-* Fan speeds are clamped to `0–255`
-* Percent inputs are converted automatically
-* All commands are sent with a trailing newline (required by Bambu MQTT)
-
-## Temperature Control
-
-### Setting Temperatures
-
-The shim supports multiple ways to control heater temperatures:
-
-#### Via G-code
-```gcode
-M109 S220        # Set extruder to 220°C
-M190 S60         # Set bed to 60°C
-M191 S45         # Set chamber to 45°C
+```bash
+docker logs --tail 100 fakeraker
 ```
 
-#### Via Moonraker Command
+### Rebuild and replace an existing container
+
+A build creates an image; it does not update a running container. With the printer idle, back up the persistent data, build the image, stop/remove the old container, then rerun the launch command above using the same mounts. Retain the old image or container if you need a rollback. Reusing the name requires removing or renaming the old container first.
+
+The container must reach the printer's LAN address. MQTT uses port 8883; FTPS defaults to 990 and also uses passive data connections. The camera defaults to port 6000. Published ports above are for clients reaching the shim, not for reaching the printer.
+
+### Durable Mainsail patch
+
+Docker builds Mainsail 2.19.0 from checksum-pinned source using Node 22 and applies [the 3MF patch](docker/mainsail/3mf-support.patch) before compiling. It adds `.3mf` (including `.gcode.3mf`) to file lists, uploads, print actions and metadata refreshes, with case-insensitive extension checks. Unknown file timestamps display as `--` instead of an epoch date. The API preserves real filenames. Legacy `.gcode` aliases remain accepted where possible for older browser tabs; exact filenames take precedence.
+
+3MF archives cannot be opened in Mainsail's plain-text editor or plain G-code viewer; those row actions are disabled. Showing a `.3mf` file does not mean it contains sliced toolpaths suitable for the printer.
+
+The patch is part of each build and survives container recreation. Updating Mainsail requires reviewing the patch and updating the source checksum. Override the source with matching values when needed:
+
+```bash
+docker build -t bambu-moonraker-shim \
+  --build-arg MAINSAIL_VERSION=2.19.0 \
+  --build-arg MAINSAIL_SOURCE_SHA256=19908bcd07804328877cf1843c2436a5c66f66e7c417972a7cd262304057cbd6 \
+  .
+```
+
+`MAINSAIL_SOURCE_URL` can override the archive URL. `FLUIDD_URL` / `FLUIDD_SHA256` and `CNC_UI_URL` / `CNC_UI_SHA256` override the other UI sources. See [Dockerfile](Dockerfile) for defaults. Unlike Mainsail's required checksum, the other checksum checks are optional.
+
+### Mock mode
+
+An empty `BAMBU_SERIAL` enables simulated printer state and local file operations. Keep mock data separate from real settings. Explicitly clear credentials and disable the camera:
+
+```bash
+docker run -d \
+  --name fakeraker-mock \
+  -p 18080:80 \
+  -e BAMBU_SERIAL= \
+  -e BAMBU_ACCESS_CODE= \
+  -e BAMBU_HOST=127.0.0.1 \
+  -e BAMBU_CAMERA_ENABLED=false \
+  bambu-moonraker-shim
+```
+
+Open <http://localhost:18080>. This example has no persistent mounts; removing it discards its mock data. Mock print/heater behavior is not hardware validation.
+
+## Persistence and the Moonraker database API
+
+* `bambu_shim.db` is the authoritative SQLite store for UI settings, external-spool settings, webcams, file cache, metadata and job history.
+* `moonraker.json` is a **one-time legacy import source**. The initial settings-store setup imports it, then leaves it untouched. An empty file is valid for a new installation. Malformed non-empty JSON stops startup so the source can be repaired and retried.
+
+Keep the existing database mount across upgrades. New settings are not written back to JSON, and later edits to JSON are not automatically imported. A pre-existing SQLite settings store with its import marker does not re-import JSON. Back up SQLite using its backup API, or stop the container before copying the database. Keep a copy of legacy JSON during migration.
+
+The database item/list API supports HTTP, WebSocket JSON-RPC and `POST /server/jsonrpc`. String keys use dots for nested fields; array keys preserve literal dots, such as filenames. Missing items return 404; stored JSON `null` returns success. POST requires `key` and `value`; DELETE returns the removed value. Internal namespaces are read-only through the public API. Maintenance entries are persisted normally.
+
+This emulates Moonraker's API using the shim's own SQLite schema. It does not read a native Moonraker database, and database backup/restore API endpoints are not implemented.
+
+`SHIM_DB_PATH` selects the SQLite file; `MOONRAKER_DB_PATH` selects the legacy JSON import source. The defaults match the Docker mounts above. Parent directories must exist when using custom paths.
+
+## Running the Python server directly
+
+Use **Python 3.11** to match the Docker runtime. A separately hosted Mainsail or Fluidd instance is needed for a UI; `main.py` serves the API.
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python main.py
+```
+
+The server loads `.env` and listens on port 7125 by default. Point the separately hosted UI at `http://<shim-host>:7125`. This repository's Mainsail 3MF patch is applied by the Docker build; a stock external Mainsail instance will not inherit it.
+
+Useful optional environment settings:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HTTP_PORT` | `7125` | Port for `python main.py`; not the Docker supervisor port |
+| `GCODES_DIR` | `gcodes` | Local files in mock mode |
+| `BAMBU_CAMERA_ENABLED` | `true` | Enable the built-in camera bridge |
+| `BAMBU_CAMERA_PORT` | `6000` | P1-style camera port |
+| `BAMBU_CAMERA_USERNAME` | `bblp` | Camera username; access code is the password |
+| `BAMBU_FTPS_PORT` | `990` | Printer FTPS port |
+| `BAMBU_FTPS_USER` | `bblp` | FTPS username |
+| `BAMBU_FTPS_PASS` | LAN access code | FTPS password override |
+| `BAMBU_FTPS_UPLOADS_DIR` | `/` | Printer directory backing the `gcodes` root |
+
+## Files and print start
+
+The `gcodes` root lists `.gcode`, `.gcode.3mf` and `.3mf` files from printer FTPS. The `config` root contains virtual compatibility files; it is not an editable Klipper configuration. Config uploads/deletes are not supported.
+
+HTTP and WebSocket file-list/directory APIs return real filenames. Deletion supports HTTP and `server.files.delete_file`, returns failures explicitly, invalidates the cache after success, and broadcasts `notify_filelist_changed`. Deletion is blocked while print state is printing or paused. Root listings are cached for up to five minutes; uploads and deletions invalidate the cache. Subdirectory uploads, directory creation, rename and duplicate operations are not implemented, even though clients may show those actions. A normal UI refresh can still use the cached root listing.
+
+Print start accepts a file already on the printer. For `.3mf`, it requests `Metadata/plate_<number>.gcode` from the archive; the default plate is 1. Upload can request auto-start using the multipart `print` flag. Files must already be sliced for the actual printer; the shim does not slice, convert arbitrary G-code, validate toolpaths or replace Bambu machine profiles.
+
+Use a known-good Bambu-compatible sliced file for an observed print test. Print-start payloads and mock flows are tested, but real print-start acceptance remains pending. A successful API response or `print_started: true` indicates the command path succeeded, not that the printer began printing.
+
+### Stored-file metadata and thumbnails
+
+`GET /server/files/metadata?filename=<path>` and `server.files.metadata` parse the requested file. They return actual source size and available slicer values: slicer/version, print-time estimate, object/layer heights, layer count, nozzle diameter, temperatures, filament length in millimetres, weight in grams, material/name/colour and preview details. These are slicer estimates, not measurements of a completed print. Missing fields are omitted rather than borrowed from the active job or filled with synthetic defaults.
+
+Sliced 3MF parsing reads `Metadata/plate_1.gcode`, matching plate PNG previews and, where present, `Metadata/slice_info.config`. Plain G-code supports common Bambu/Orca/Prusa/Cura comments and embedded base64 PNG/JPEG previews. An unsliced project archive has no printable plate metadata and returns an explicit error. No paths are extracted from an archive to disk.
+
+Metadata defaults to plate 1 when present, otherwise the first sliced plate in the archive (single-plate exports can retain another plate number). The optional `plate` parameter selects another positive plate number for metadata/scan/thumbnail requests; `plate_count` describes the sliced plates found in a 3MF. Mainsail's ordinary file list uses this automatic selection. Metadata plate selection does not change the plate used by print start; an export containing only plate 4 still needs `plate=4` in its print-start request.
+
+The first scan downloads the source over FTPS and can take time; subsequent requests use the cache. Metadata and preview bytes persist in `bambu_shim.db`. Cache keys include the filename, plate, parser version, source size and modification time. Upload/delete invalidates affected metadata; changed source fingerprints cause re-parsing. Root FTPS listings can remain cached for five minutes. Use **Scan Metadata** (`server.files.metascan` or `POST /server/files/metascan?filename=<path>`) to force a fresh listing and scan. If FTPS provides no timestamp, `modified` is zero (unknown), and metadata is re-read after five minutes to catch same-size changes.
+
+A 64 px list thumbnail is generated when embedded previews do not fit Mainsail’s icon size; original previews are retained. Preview records use Moonraker-relative `.thumbs/` URLs served from SQLite, without writing previews to the printer. `server.files.thumbnails` and `GET /server/files/thumbnails` expose thumbnail details. Parsing is bounded to 256 MiB source files, 128 MiB per archived G-code member, 4 MiB XML configuration and 8 MiB per preview; oversized/unsupported archives return errors. Other archive layouts, binary G-code and non-PNG/JPEG thumbnail formats are not supported.
+
+## Heater behavior
+
+The established outgoing heater commands are **M109, M190 and M191**. Both the corresponding wait and non-wait input commands (`M104`/`M109`, `M140`/`M190`, `M141`/`M191`) are intercepted and routed through the same heater functions. `SET_HEATER_TEMPERATURE` uses those functions too.
+
+**Non-blocking input does not currently preserve non-blocking semantics.** Whether native non-wait commands work reliably on the development printer remains unresolved. The API does not wait for the heater to reach its target before replying. Locally tracked targets can appear before telemetry confirms them.
+
+Examples of accepted console commands:
+
 ```gcode
+M109 S220
+M190 S60
 SET_HEATER_TEMPERATURE HEATER=extruder TARGET=220
 SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60
-SET_HEATER_TEMPERATURE HEATER=heater_chamber TARGET=45
 ```
 
-### Supported Ranges
+The shim validates targets against fixed software ranges: extruder 0–300°C, bed 0–120°C, chamber 0–70°C. These are not detected hardware limits. P1/A1 model hints hide chamber temperature controls; exposing a chamber object on another model does not establish that it has an active chamber heater.
 
-* **Bed**: 0-120°C
-* **Extruder**: 0-300°C
-* **Chamber**: 0-70°C
+## Controls and built-in macros
 
-### Important Notes
+Supported command paths include homing, XYZ movement, motor disable, chamber light, fan controls and print-speed selection. `M220` percentages map to the nearest Bambu preset: silent 50%, standard 100%, sport 124%, ludicrous 166%. This is not continuous Klipper speed scaling.
 
-**Behavior notes:**
-* Heater commands are sent using MQTT G-code (`M109`, `M190`, `M191`)
-* The shim tracks target temperatures locally when MQTT telemetry does not immediately echo targets
+| Fan | MQTT G-code mapping |
+| --- | --- |
+| Part cooling | `M106 P1` |
+| Auxiliary | `M106 P2` |
+| Chamber/exhaust | `M106 P3` |
 
-## Klipper Macro Support
+Fan values are normalized and clamped to 0–255. Actual fan availability depends on the printer.
 
-The shim provides compatibility with common Klipper macros used by slicers. This allows you to use your existing slicer profiles without modification.
+The shim implements a fixed set of macro handlers; it does not execute user-defined Klipper/Jinja macros.
 
-### PRINT_START / START_PRINT
+| Macro | Implemented action |
+| --- | --- |
+| `PRINT_START` / `START_PRINT` | Send G28, then optional bed, nozzle and chamber targets |
+| `PRINT_END` / `END_PRINT` | Request heater targets of zero, part/aux fans off, then M84; does not explicitly switch off the chamber fan |
+| `HEATERS_OFF` / `TURN_OFF_HEATERS` | Request heater targets of zero |
+| `PAUSE` / `RESUME` / `CANCEL_PRINT` | Send the corresponding native print-control command |
+| `BED_MESH_CALIBRATE` | Accepted as a no-op; does not request leveling |
 
-Used by slicers to initialize the printer. Supports parameter variants from different slicers:
+Start macros accept `BED` / `BED_TEMP`, `HOTEND` / `EXTRUDER` / `EXTRUDER_TEMP`, and `CHAMBER`. For example:
 
 ```gcode
 PRINT_START BED=60 HOTEND=220
-PRINT_START BED_TEMP=60 EXTRUDER_TEMP=220
-START_PRINT BED=60 HOTEND=220 CHAMBER=45
 ```
 
-**Supported parameters:**
-* `BED` or `BED_TEMP` - Bed temperature
-* `HOTEND`, `EXTRUDER`, or `EXTRUDER_TEMP` - Nozzle temperature
-* `CHAMBER` - Chamber temperature target
+This is a compatibility handler, not a replacement for a Bambu slicer's complete start sequence. It does not request leveling. Native file-print start has a separate bed-leveling option. Existing Klipper slicer profiles are not automatically compatible.
 
-**Actions performed:**
-1. Home all axes (G28)
-2. Heat bed to target temperature
-3. Heat nozzle to target temperature
-4. Heat chamber to target temperature when provided
-5. Auto-leveling (handled automatically by Bambu printer)
+### External spool
 
-### PRINT_END / END_PRINT
+One-click macros `SET_PLA`, `SET_PETG`, `SET_ABS`, `SET_ASA`, `SET_TPU`, `SET_PC` and `SET_PA` select a generic material profile and nozzle range while preserving the current colour. They change filament metadata without heating or moving the printer. The defaults are editable metadata, not universal temperature recommendations for every filament brand.
 
-Used by slicers to clean up after printing:
+For custom settings:
 
 ```gcode
-PRINT_END
-END_PRINT
+SET_EXTERNAL_FILAMENT MATERIAL=ABS COLOR=FFFFFF
 ```
 
-**Actions performed:**
-1. Set heaters to 0°C
-2. Turn off all fans (part cooling, aux, chamber)
-3. Disable motors
+`COLOR` accepts `RRGGBB` or `RRGGBBAA`, optionally prefixed by `#`. Optional `TEMP_MIN`, `TEMP_MAX` and `PROFILE_ID` override defaults. Custom material names require an explicit profile and temperature range. Omitting fields preserves current reported/saved values; changing material resets the profile and range to that material's defaults.
 
-**Note:** Cooling behavior is firmware-controlled.
+Load/unload use native Bambu external-spool commands and **may heat and move the printer**. They need an operator present. The operator has verified initial load and unload on the P1S; the load-confirmation responses below still need hardware verification:
 
-### Other Supported Macros
-
-* `PAUSE` - Pause current print
-* `RESUME` - Resume paused print
-* `CANCEL_PRINT` - Cancel/stop current print
-* `BED_MESH_CALIBRATE` - Accepted (Bambu auto-levels automatically, no action needed)
-
-### Slicer Configuration Examples
-
-#### PrusaSlicer / SuperSlicer
-
-**Start G-code:**
 ```gcode
-PRINT_START EXTRUDER_TEMP={first_layer_temperature[initial_extruder]} BED_TEMP=[first_layer_bed_temperature]
+UNLOAD_EXTERNAL_FILAMENT TEMP=260
+LOAD_EXTERNAL_FILAMENT
 ```
 
-**End G-code:**
-```gcode
-PRINT_END
+Without `TEMP`, unload uses the midpoint of the reported/saved nozzle range. Unknown material temperature requires an explicit value. `LOAD_FILAMENT` and `UNLOAD_FILAMENT` remain external aliases when AMS parameters are absent.
+
+When the printer asks **Has filament extruded?**, use `EXTERNAL_FILAMENT_EXTRUDED` for **Yes / finish**, or `EXTERNAL_FILAMENT_RETRY` for **No / retry extrusion**. These macro buttons send native `ams_control` responses (`done` / `resume`), rather than print-resume commands. They require a matching printer-reported question and confirmed external-spool selection, and are blocked during printing/paused states. The macro variable `awaiting_extrusion_confirmation` tracks the question across telemetry deltas; firmware reports clear it. No automatic dialog is displayed yet; use the External Spool macro buttons.
+
+The handlers support one external spool on a single-nozzle printer. They refuse external operations when disconnected, printing/paused, missing an idle-state report, or using an AMS tray. Dual-external/dual-nozzle routing is not implemented. AFC integration for AMS is future work; existing AMS command paths do not constitute a validated AFC interface.
+
+Settings persist in namespace `bambu_shim`, key `external_filament`. Macro variables distinguish saved/requested values from confirmation via `sync_state` and report matching rejections in `last_error`. Loaded state comes from telemetry (or simulation in mock mode), not from publish success. See [external spool implementation notes](research/external-spool-macros.md).
+
+Mainsail basic mode discovers the buttons automatically. Existing expert-mode layouts may hide new macros. Add them through macro settings, or run this helper with the Python dependencies installed:
+
+```bash
+python scripts/configuration/install_external_spool_panel.py --url http://localhost:7125
 ```
 
-#### OrcaSlicer (Recommended for Bambu)
+It adds an External Spool group while preserving existing groups/layout entries and sends no printer command. The parameter menus come from the shim's virtual configuration.
 
-**Start G-code:**
-```gcode
-PRINT_START BED=[first_layer_bed_temperature] HOTEND={first_layer_temperature[initial_extruder]}
-```
+## Remaining gaps
 
-**End G-code:**
-```gcode
-PRINT_END
-```
-
-#### Cura
-
-**Start G-code:**
-```gcode
-START_PRINT BED_TEMP={material_bed_temperature_layer_0} HOTEND={material_print_temperature_layer_0}
-```
-
-**End G-code:**
-```gcode
-END_PRINT
-```
-
-## Known Issues
-
-### Temperature Control
-
-* The shim uses heater commands over MQTT (`M109`, `M190`, `M191`)
-* Firmware behavior can vary by printer and firmware revision
-
-### FTPS File Operations
-
-* File caching is implemented to reduce load on printer
-* Cache invalidation happens on uploads/deletes
-* Large file listings may be slow on first load
-* File operations require same credentials as MQTT (username: `bblp`, password: access code)
-* In mock mode (no `BAMBU_SERIAL`), file browsing uses local mock files and does not require FTPS
-
-### General
-
-* **LAN-only mode recommended**: For full local control, set your printer to LAN-only mode in Bambu Studio/Handy app
-* **Firmware updates**: Bambu firmware updates may change MQTT/FTPS behavior
-* **No custom macros**: Only the built-in macros listed above are supported; custom user-defined macros cannot be added
-* **Print start**: Starting prints from uploaded files is supported, but behavior can vary by model/firmware and file format
+* Physical acceptance tests for print start, heater semantics, external load confirmation/retry and other controls. Initial external load and unload have been operator verified.
+* Reliable command acceptance/error reporting: most MQTT controls publish in background tasks, so an API success can precede a transport failure or printer rejection. External-spool commands await transport delivery, which still is not physical completion.
+* More slicer metadata formats and preview encodings. Current parsing supports Bambu/Orca sliced 3MF layouts and common Bambu/Orca/Prusa/Cura G-code comments; unsupported or absent fields are omitted.
+* Durable active-job recovery across restarts and more accurate history accounting.
+* Full console response/history support, custom macros, job queueing and AMS/AFC UI integration.
+* File rename/duplicate, directory mutation and subdirectory uploads.
+* Per-client status subscription filtering; current broadcasts are global.
+* Full HTTP/WebSocket API parity, native Moonraker database interoperability and backup/restore endpoints.
+* Camera/model support beyond the currently observed P1S path.
 
 ## Troubleshooting
 
-### Printer Not Connecting
+**Connection:** verify IP, serial, access code and container-to-printer reachability. Use the printer's LAN-only mode for the documented setup. Inspect `docker logs fakeraker` for MQTT/FTPS errors.
 
-1. Verify printer IP address is correct
-2. Check LAN access code matches printer screen
-3. Ensure printer serial number is correct
-4. Try LAN-only mode on printer (disable cloud connection)
-5. Check firewall isn't blocking port 8883 (MQTT) or 990 (FTPS)
+**Settings:** confirm `/app/bambu_shim.db` is mounted as a writable file. Saves belong there, not in `moonraker.json`. For initial migration errors, repair a copy of the legacy JSON and preserve the original. Do not delete the live database to force an import.
 
-### Temperature Commands Not Working
+**Missing 3MF files after an upgrade:** refresh/reopen Mainsail so its service worker can load the new build; try a hard refresh if needed. Check `http://localhost:8080/.version` reports `v2.19.0`. An externally hosted stock Mainsail does not include this patch.
 
-1. **For heating**: Use `M109`, `M190`, and `M191` or `SET_HEATER_TEMPERATURE`
-2. **For direct control**: Use `M109`, `M190`, and `M191` or `SET_HEATER_TEMPERATURE`
-3. **For turning off**: Set target to `0` and allow firmware-managed cooldown
-4. Ensure printer is in LAN-only mode (not connected to cloud)
-5. Check that commands sent via console include proper formatting
+**File operations:** verify FTPS credentials and passive connectivity. Root listings may remain cached for five minutes; pressing Refresh alone does not force cache eviction. Config files are read-only, and some visible client file actions are unimplemented. Inspect API errors rather than assuming a button succeeded.
 
-### Macros Not Working
+**Heaters:** use the established heater path above and observe actual telemetry. Repeated non-wait inputs do not test native non-wait behavior because the shim translates them. A changed target display does not prove the printer accepted a command.
 
-1. Verify macro name is spelled correctly (case-insensitive)
-2. Check parameter names match supported variants (BED vs BED_TEMP, etc.)
-3. Look for error messages in shim console output
-4. Try sending equivalent G-code commands directly to verify printer response
+**Missing external macros:** check Mainsail's basic/expert layout and run the group helper if needed. Macro names are case-insensitive; parameter validation failures appear as API errors.
 
-### File Operations Failing
+## Development and contributing
 
-1. Verify FTPS credentials (same as MQTT: `bblp` / access code)
-2. Check printer allows local FTPS connections
-3. Try refreshing file list to clear cache
-4. Ensure printer is not in cloud-only mode
-
-### G-codes Tab Missing In Mainsail
-
-1. Hard refresh Mainsail (`Ctrl+Shift+R` / `Cmd+Shift+R`)
-2. Confirm `/server/info` includes `registered_directories` with `gcodes`
-3. Confirm `/server/files/roots` returns both `gcodes` and `config`
-4. In mock mode, run without `.env` so FTPS is not queried
-
-## Limitations / Roadmap
-
-* Better start print implementation
-* Full G-code console with command history
-* User-defined custom macros
-* More complete Moonraker API coverage
-* Better error handling and state reconciliation
-* Enhanced job history tracking
-
-This project is evolving quickly and may break at any time.
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Test your changes thoroughly
-2. Follow existing code style
-3. Document new features
-4. Submit pull requests against the main branch
-
-## License
-
-MIT License — see [LICENSE](LICENSE).
-
-## Development checks
-
-Run the automated suite without printer commands:
+Run automated checks with the Python dependencies installed:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Tests use temporary stores for settings, cache, and history writes. Manual MQTT LED diagnostics live under `scripts/diagnostics/` and require an intentional invocation.
+Tests use temporary stores and mocked transports. Hardware diagnostics under `scripts/diagnostics/` are separate and require intentional invocation. The mock-only file smoke check refuses a configured real printer:
 
-See [the compatibility review](research/2026-10-26-compatibility.md) for the latest audit, references, and remaining work.
+```bash
+docker exec fakeraker-mock python -m scripts.validation.smoke_file_delete
+```
+
+As of the 2026-10-26 review, 112 automated tests passed locally and in Docker with networking disabled. Mock upload/delete and browser checks passed; these do not close the physical-test gaps above. See [the compatibility review](research/2026-10-26-compatibility.md) for evidence, protocol references and remaining work, including comparisons with Bambuddy.
+
+Contributions should include relevant validation and documentation. Target the repository's `master` branch.
+
+## License
+
+The shim is MIT licensed; see [LICENSE](LICENSE). Bundled upstream UIs retain their own licenses.
