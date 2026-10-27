@@ -168,7 +168,9 @@ HTTP and WebSocket file-list/directory APIs return real filenames. Deletion supp
 
 Print start accepts a file already on the printer. For `.3mf`, it requests `Metadata/plate_<number>.gcode` from the archive; the default plate is 1. Upload can request auto-start using the multipart `print` flag. Files must already be sliced for the actual printer; the shim does not slice, convert arbitrary G-code, validate toolpaths or replace Bambu machine profiles.
 
-Use a known-good Bambu-compatible sliced file for an observed print test. Print-start payloads and mock flows are tested, but real print-start acceptance remains pending. A successful API response or `print_started: true` indicates the command path succeeded, not that the printer began printing.
+Use a known-good Bambu-compatible sliced file for an observed print test. Print-start payloads and mock flows are tested, but real print-start acceptance remains pending. Real starts now await a matching firmware `project_file` acknowledgement; transport completion alone cannot return success. Timeouts and firmware rejections return errors, and start requests are never automatically replayed. An acceptance acknowledgement still needs subsequent live preparation/printing telemetry to establish that the job began.
+
+Start requests use fresh nonzero signed-int32 job IDs, native array mappings, and the `bed_leveling` spelling. For P1/A1 printers the file URL is an absolute `file:///sdcard/...` reference; other models use `ftp:///...`. Active/paused/unknown printer states and a concurrent pending start block another submission. The observed P1S on firmware 01.06.30.01 has not acknowledged remote `project_file` submissions; this remains unresolved. That firmware predates the newer authorization system. The same uploaded Benchy successfully entered preparation when started from the printer's SD-card menu.
 
 ### Stored-file metadata and thumbnails
 
@@ -266,7 +268,7 @@ It adds an External Spool group while preserving existing groups/layout entries 
 
 ## Remaining gaps
 
-* Physical acceptance tests for print start, heater semantics, external load confirmation/retry and other controls. Initial external load and unload have been operator verified.
+* Physical acceptance tests for remote print start, heater semantics, pause/resume and other controls. External initial load, unload, extrusion confirmation/retry buttons, and cancel have been operator verified. The supplied Benchy entered preparation through the printer's SD-card menu; it was cancelled before printing layers.
 * Reliable command acceptance/error reporting: most MQTT controls publish in background tasks, so an API success can precede a transport failure or printer rejection. External-spool commands await transport delivery, which still is not physical completion.
 * More slicer metadata formats and preview encodings. Current parsing supports Bambu/Orca sliced 3MF layouts and common Bambu/Orca/Prusa/Cura G-code comments; unsupported or absent fields are omitted.
 * Durable active-job recovery across restarts and more accurate history accounting.

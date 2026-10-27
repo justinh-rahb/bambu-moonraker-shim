@@ -158,7 +158,8 @@ class BambuClientTests(unittest.IsolatedAsyncioTestCase):
         client = BambuClient()
         client.connected = True
         client._mqtt_client = AsyncMock()
-        client.publish_command = AsyncMock()
+        client._reported_print_state = "IDLE"
+        client._publish_print_start = AsyncMock(return_value={"result": "ok"})
 
         previous_model = Config.BAMBU_MODEL
         Config.BAMBU_MODEL = "H2D"
@@ -181,9 +182,9 @@ class BambuClientTests(unittest.IsolatedAsyncioTestCase):
             Config.BAMBU_MODEL = previous_model
 
         self.assertEqual(result, {"result": "ok"})
-        payload = client.publish_command.await_args.args[0]["print"]
-        self.assertEqual(payload["url"], "ftp://folder/test.3mf")
-        self.assertEqual(payload["file"], "folder/test.3mf")
+        payload = client._publish_print_start.await_args.args[0]["print"]
+        self.assertEqual(payload["url"], "ftp:///folder/test.3mf")
+        self.assertEqual(payload["file"], "/folder/test.3mf")
         self.assertEqual(payload["subtask_name"], "folder/test")
         self.assertEqual(payload["param"], "Metadata/plate_2.gcode")
         self.assertEqual(payload["auto_bed_leveling"], 1)
@@ -191,14 +192,15 @@ class BambuClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["layer_inspect"], 1)
         self.assertEqual(payload["extrude_cali_flag"], 0)
         self.assertEqual(payload["use_ams"], True)
-        self.assertEqual(payload["ams_mapping"], "0,1")
+        self.assertEqual(payload["ams_mapping"], [0, 1])
         self.assertEqual(payload["ams_mapping2"], [{"ams_id": 1, "slot_id": 2}])
 
     async def test_start_print_p2s_forces_vibration_cali_false(self):
         client = BambuClient()
         client.connected = True
         client._mqtt_client = AsyncMock()
-        client.publish_command = AsyncMock()
+        client._reported_print_state = "IDLE"
+        client._publish_print_start = AsyncMock(return_value={"result": "ok"})
 
         previous_model = Config.BAMBU_MODEL
         Config.BAMBU_MODEL = "P2S"
@@ -211,8 +213,171 @@ class BambuClientTests(unittest.IsolatedAsyncioTestCase):
             Config.BAMBU_MODEL = previous_model
 
         self.assertEqual(result, {"result": "ok"})
-        payload = client.publish_command.await_args.args[0]["print"]
+        payload = client._publish_print_start.await_args.args[0]["print"]
         self.assertEqual(payload["vibration_cali"], False)
+
+    async def test_print_start_uses_nonzero_distinct_job_ids_and_omits_mapping(self):
+        client = BambuClient()
+        client.connected = True
+        client._reported_print_state = 'FINISH'
+        client._publish_print_start = AsyncMock(return_value={'result': 'ok'})
+        with patch('bambu_moonraker_shim.bambu_client.time.time', return_value=100):
+            await client.start_print('benchy.3mf')
+            await client.start_print('benchy.3mf')
+            await client.start_print('benchy.3mf')
+        a, b, c = [call.args[0]['print'] for call in client._publish_print_start.await_args_list]
+        self.assertEqual(len({a['task_id'], b['task_id'], c['task_id']}), 3)
+        self.assertTrue(0 < int(a['task_id']) <= 2147483647)
+        self.assertEqual(a['task_id'], a['project_id'])
+        self.assertEqual(a['task_id'], a['subtask_id'])
+        self.assertTrue(a['bed_leveling'])
+        self.assertIs(type(a['auto_bed_leveling']), int)
+        self.assertNotIn('bed_levelling', a)
+        self.assertNotIn('cfg', a)
+        self.assertNotIn('ams_mapping', a)
+
+    async def test_print_start_blocks_active_unknown_or_pending_submission(self):
+        client = BambuClient()
+        client.connected = True
+        client._publish_print_start = AsyncMock()
+        for state in (None, 'RUNNING', 'PAUSE', 'PREPARE', 'SLICING'):
+            client._reported_print_state = state
+            self.assertIn('error', await client.start_print('test.3mf'))
+        client._reported_print_state = 'IDLE'
+        client._pending_print_start = ('1', None)
+        self.assertIn('error', await client.start_print('test.3mf'))
+        client._publish_print_start.assert_not_awaited()
+
+    async def test_p1_and_a1_start_references_absolute_sd_card_file(self):
+        client = BambuClient()
+        client.connected = True
+        client._reported_print_state = 'FINISH'
+        client._publish_print_start = AsyncMock(return_value={'result': 'ok'})
+        for model in ('P1S', 'P1P', 'A1', 'A1 MINI'):
+            with patch.object(Config, 'BAMBU_MODEL', model):
+                await client.start_print('/benchy.gcode.3mf')
+            body = client._publish_print_start.await_args.args[0]['print']
+            self.assertEqual(body['url'], 'file:///sdcard/benchy.gcode.3mf')
+            self.assertEqual(body['file'], '/benchy.gcode.3mf')
+
+    async def test_print_start_requires_matching_firmware_ack_even_without_puback(self):
+        from types import SimpleNamespace
+        client = BambuClient()
+        client._mqtt_client = AsyncMock()
+        client._parse_telemetry = AsyncMock()
+        async def publish(topic, payload, **kwargs):
+            body = json.loads(payload)
+            fields = body['print']
+            self.assertEqual(body.get('user_id'), client.user_id)
+            self.assertEqual(kwargs['qos'], 1)
+            self.assertTrue(20000 <= int(fields['sequence_id']) < 30000)
+            # An unrelated acknowledgement must not finish the request.
+            for seq in ('unrelated', fields['sequence_id']):
+                await client._handle_message(SimpleNamespace(payload=json.dumps({'print': {
+                    'command': 'project_file', 'sequence_id': seq, 'result': 'success',
+                }}).encode()))
+            raise TimeoutError('No broker PUBACK')
+        client._mqtt_client.publish.side_effect = publish
+        self.assertEqual(await client._publish_print_start({'print': {'command': 'project_file'}}), {'result': 'ok'})
+        client._mqtt_client.publish.assert_awaited_once()
+        self.assertIsNone(client._pending_print_start)
+
+    async def test_print_start_timeout_and_rejection_never_replay(self):
+        from types import SimpleNamespace
+        for reject in (False, True):
+            client = BambuClient()
+            client._mqtt_client = AsyncMock()
+            client._parse_telemetry = AsyncMock()
+            client._print_start_timeout = .02
+            async def publish(topic, payload, **kwargs):
+                if reject:
+                    seq = json.loads(payload)['print']['sequence_id']
+                    await client._handle_message(SimpleNamespace(payload=json.dumps({'print': {
+                        'command': 'project_file', 'sequence_id': seq, 'result': 'fail', 'reason': 'busy',
+                    }}).encode()))
+            client._mqtt_client.publish.side_effect = publish
+            result = await client._publish_print_start({'print': {'command': 'project_file'}})
+            self.assertIn('busy' if reject else 'not acknowledge', result['error'])
+            client._mqtt_client.publish.assert_awaited_once()
+            self.assertIsNone(client._pending_print_start)
+
+    async def test_command_ack_does_not_replace_live_job_or_error(self):
+        from types import SimpleNamespace
+        client = BambuClient()
+        client._parse_telemetry = AsyncMock()
+        await client._handle_message(SimpleNamespace(payload=json.dumps({'print': {
+            'command': 'project_file', 'result': 'success', 'subtask_name': 'request echo',
+            'print_error': 123,
+        }}).encode()))
+        client._parse_telemetry.assert_not_awaited()
+
+    async def test_new_job_delta_resets_previous_progress_but_resume_preserves_it(self):
+        client = BambuClient()
+        client._latest_layer_num = client._latest_total_layer_num = 674
+        client._latest_remaining_time = 200
+        with patch.object(state_manager, 'update_state', AsyncMock()) as update:
+            await client._parse_telemetry({'gcode_state': 'PREPARE', 'subtask_name': 'benchy'})
+            values = update.await_args.args[0]
+            self.assertEqual(values['print_stats']['info'], {'current_layer': 0, 'total_layer': 0})
+            self.assertEqual(values['display_status']['progress'], 0)
+            self.assertEqual(values['virtual_sdcard']['file_position'], 0)
+            await client._parse_telemetry({'gcode_state': 'RUNNING', 'subtask_name': 'benchy',
+                                          'layer_num': 1, 'total_layer_num': 192, 'mc_percent': 1})
+            values = update.await_args.args[0]
+            self.assertEqual(values['print_stats']['info']['total_layer'], 192)
+            self.assertEqual(values['display_status']['progress'], .01)
+            await client._parse_telemetry({'gcode_state': 'PAUSE'})
+            await client._parse_telemetry({'gcode_state': 'RUNNING', 'subtask_name': 'benchy'})
+            values = update.await_args.args[0]
+            self.assertNotIn('progress', values.get('display_status', {}))
+            self.assertEqual(client._latest_layer_num, 1)
+
+    async def test_print_start_timeout_reports_native_printer_error(self):
+        client = BambuClient()
+        client._mqtt_client = AsyncMock()
+        client._print_start_timeout = .01
+        with patch.object(state_manager, 'update_state', AsyncMock()):
+            await client._parse_telemetry({'print_error': 84033543})
+        result = await client._publish_print_start({'print': {'command': 'project_file'}})
+        self.assertIn(f'{84033543:08X}', result['error'])
+
+    async def test_only_correlated_successful_stop_maps_failed_to_cancelled(self):
+        from types import SimpleNamespace
+        client = BambuClient()
+        client._cancel_sequence = '25'
+        with patch.object(state_manager, 'update_state', AsyncMock()) as update:
+            for seq, result in (('other', 'success'), ('25', 'fail'), ('25', 'success')):
+                await client._handle_message(SimpleNamespace(payload=json.dumps({'print': {
+                    'command': 'stop', 'sequence_id': seq, 'result': result,
+                }}).encode()))
+                await client._parse_telemetry({'gcode_state': 'FAILED'})
+                expected = 'cancelled' if seq == '25' and result == 'success' else 'error'
+                self.assertEqual(update.await_args.args[0]['print_stats']['state'], expected)
+            await client._parse_telemetry({'gcode_state': 'PREPARE', 'subtask_name': 'next job'})
+            self.assertFalse(client._cancel_confirmed)
+            await client._parse_telemetry({'gcode_state': 'FAILED'})
+            self.assertEqual(update.await_args.args[0]['print_stats']['state'], 'error')
+
+    async def test_acknowledged_stop_does_not_replay_on_broker_timeout(self):
+        client = BambuClient()
+        client._mqtt_client = AsyncMock()
+        client._cancel_sequence = '25'
+        async def publish(*args, **kwargs):
+            client._cancel_confirmed = True
+            raise TimeoutError('Missing PUBACK')
+        client._mqtt_client.publish.side_effect = publish
+        await client._publish_background('topic', json.dumps({'print': {
+            'command': 'stop', 'sequence_id': '25',
+        }}), 1)
+        client._mqtt_client.publish.assert_awaited_once()
+
+    def test_ams_mapping_uses_wire_arrays_and_accepts_legacy_csv(self):
+        for source in ([0, 1], '0,1', '[0,1]'):
+            self.assertEqual(BambuClient._normalize_ams_mapping(source), [0, 1])
+        self.assertIsNone(BambuClient._normalize_ams_mapping(''))
+        for source in ('bad', {'tray': 0}, [True], [1.5]):
+            with self.assertRaises((ValueError, TypeError)):
+                BambuClient._normalize_ams_mapping(source)
 
     async def test_parse_telemetry_normalizes_fan_steps(self):
         client = BambuClient()

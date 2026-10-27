@@ -3,6 +3,7 @@ import json
 import os
 import ssl
 import time
+import uuid
 from typing import Optional, Dict, Any, List
 import aiomqtt
 from bambu_moonraker_shim.config import Config
@@ -66,6 +67,12 @@ class BambuClient:
         self._external_tray_target: Optional[int] = None
         self._multiple_external_spools = False
         self._external_extrusion_prompt = False
+        self._pending_print_start = None
+        self._last_submission_id = 0
+        self._print_start_timeout = 20
+        self._native_print_error = 0
+        self._cancel_sequence = None
+        self._cancel_confirmed = False
 
     async def start(self):
         """Starts the MQTT loop."""
@@ -107,12 +114,17 @@ class BambuClient:
                     port=8883,
                     username="bblp",
                     password=self.access_code,
-                    tls_context=tls_context
+                    tls_context=tls_context,
+                    identifier=f"bambu-shim-{uuid.uuid4().hex[:12]}",
+                    protocol=aiomqtt.ProtocolVersion.V311,
+                    max_inflight_messages=1000,
                 ) as client:
                     self._mqtt_client = client
                     self._reported_print_state = None
                     self._external_tray_now = None
                     self._external_tray_target = None
+                    self._cancel_sequence = None
+                    self._cancel_confirmed = False
                     self._external_extrusion_prompt = False
                     await self._external_state({"awaiting_extrusion_confirmation": False})
                     self.connected = True
@@ -148,12 +160,26 @@ class BambuClient:
             # Bambu payload structure is complex. We look for 'print' object usually
             if not isinstance(payload, dict):
                 return
+            info = payload.get("info")
+            if isinstance(info, dict) and isinstance(info.get("module"), list):
+                modules = [{key: module[key] for key in ("name", "sw_ver", "hw_ver") if key in module}
+                           for module in info["module"] if isinstance(module, dict)]
+                print(f"Printer firmware modules: {json.dumps(modules)}")
             if isinstance(payload.get("print"), dict):
                 data = payload["print"]
                 if isinstance(data, dict):
                     command_name = data.get("command")
                     if command_name and command_name != "push_status":
                         print(f"MQTT report message: {json.dumps(data)}")
+                    if (command_name == "stop" and self._cancel_sequence is not None
+                            and str(data.get("sequence_id")) == self._cancel_sequence
+                            and str(data.get("result", "")).lower() == "success"):
+                        self._cancel_confirmed = True
+                    pending = self._pending_print_start
+                    if (pending and command_name == "project_file"
+                            and str(data.get("sequence_id")) == pending[0]
+                            and data.get("result") and not pending[1].done()):
+                        pending[1].set_result(data)
                     if (command_name == "ams_filament_setting"
                             and self._external_pending is not None
                             and str(data.get("sequence_id")) == self._external_setting_sequence
@@ -161,6 +187,8 @@ class BambuClient:
                         self._external_rejected = str(data.get("reason") or "Printer rejected filament settings")
                         self._external_pending = None
                         await self._external_state({"sync_state": "failed", "last_error": self._external_rejected})
+                    if command_name and command_name != "push_status":
+                        return  # Command echoes are not observed printer telemetry.
                 await self._parse_telemetry(data)
                 
         except (UnicodeDecodeError, ValueError, TypeError) as exc:
@@ -169,6 +197,14 @@ class BambuClient:
     async def _parse_telemetry(self, data: Dict[str, Any]):
         """Maps Bambu telemetry to Moonraker state."""
         updates = {}
+        if data.get("command") in (None, "push_status") and "print_error" in data:
+            try:
+                native_error = int(data["print_error"])
+            except (ValueError, TypeError):
+                native_error = 0
+            if native_error != self._native_print_error:
+                print(f"Native printer error changed: 0x{native_error:08X} ({native_error})")
+            self._native_print_error = native_error
         await self._parse_external_filament(data)
         now = time.time()
         current_filename = str(data.get("subtask_name") or "")
@@ -255,10 +291,14 @@ class BambuClient:
             elif bambu_state == "FINISH":
                 klipper_state = "complete" # Or standby?
             elif bambu_state == "FAILED":
-                klipper_state = "error"
+                klipper_state = "cancelled" if self._cancel_confirmed else "error"
             elif bambu_state == "IDLE":
                 klipper_state = "standby"
 
+            new_job = klipper_state == "printing" and (
+                self._job_started_at is None or self._job_finished_at is not None
+                or (current_filename and current_filename != self._active_job_filename)
+            )
             self._update_job_timing(klipper_state, current_filename, now)
 
             updates["print_stats"] = {
@@ -273,6 +313,17 @@ class BambuClient:
             updates["virtual_sdcard"] = {
                 "is_active": klipper_state == "printing"
             }
+            if new_job:
+                self._cancel_confirmed = False
+                self._cancel_sequence = None
+                # Status frames are deltas: absent metrics must not carry the
+                # previous completed job's 100% and final layer into preparation.
+                self._latest_remaining_time = 0
+                self._latest_layer_num = 0
+                self._latest_total_layer_num = 0
+                updates["print_stats"].update(filament_used=0.0, info={"current_layer": 0, "total_layer": 0})
+                updates["virtual_sdcard"].update(progress=0.0, file_position=0)
+                updates["display_status"] = {"progress": 0.0}
 
         if "mc_remaining_time" in data:
             try:
@@ -596,6 +647,9 @@ class BambuClient:
             return
 
         command_with_sequence = self._inject_sequence_id(command)
+        if command_with_sequence.get("print", {}).get("command") == "stop":
+            self._cancel_sequence = command_with_sequence["print"]["sequence_id"]
+            self._cancel_confirmed = False
         print(f"Sending MQTT Command: {json.dumps(command_with_sequence)}")
         topic = f"device/{self.serial}/request"
         payload = json.dumps(command_with_sequence)
@@ -620,6 +674,11 @@ class BambuClient:
             await self._mqtt_client.publish(topic, payload, qos=qos)
         except Exception as exc:
             if qos == 1:
+                fields = json.loads(payload).get("print", {})
+                if (fields.get("command") == "stop" and self._cancel_confirmed
+                        and str(fields.get("sequence_id")) == self._cancel_sequence):
+                    print("Firmware acknowledged stop; skipping broker-timeout replay.")
+                    return
                 if not self._prefer_qos0_for_print:
                     print("MQTT qos=1 appears unsupported/reliable on this printer; using qos=0 for print commands.")
                 self._prefer_qos0_for_print = True
@@ -722,6 +781,11 @@ class BambuClient:
         if not self.connected:
             return {"error": "Printer not connected"}
 
+        if not self._mock_mode and self._reported_print_state not in {"IDLE", "FINISH", "FAILED"}:
+            return {"error": "Print start requires confirmed idle printer telemetry"}
+        if self._pending_print_start is not None:
+            return {"error": "A print-start request is already awaiting printer confirmation"}
+
         if not filename:
             return {"error": "Filename required"}
 
@@ -751,7 +815,10 @@ class BambuClient:
                 return 1 if boolean_value else 0
             return boolean_value
 
-        cleaned_ams_mapping = self._normalize_ams_mapping(ams_mapping)
+        try:
+            cleaned_ams_mapping = self._normalize_ams_mapping(ams_mapping)
+        except (ValueError, TypeError):
+            return {"error": "AMS mapping must be an array of integer tray IDs"}
         cleaned_ams_mapping2 = self._normalize_ams_mapping2(ams_mapping2)
         subtask_name = self._subtask_name(normalized)
 
@@ -768,40 +835,85 @@ class BambuClient:
             )
             return {"result": "ok", "mock": True}
 
+        # Fresh nonzero signed-int32 identities match BambuStudio/Bambuddy.
+        # Zero task IDs can leave P1S firmware treating a submission as an old job.
+        submission = max(int(time.time() * 1000) % 2_147_483_647 or 1,
+                         self._last_submission_id + 1)
+        submission = (submission - 1) % 2_147_483_647 + 1
+        self._last_submission_id = submission
         cmd = {
             "print": {
                 "command": "project_file",
                 "param": param,
-                "project_id": "0",
+                "project_id": str(submission),
                 "profile_id": "0",
-                "task_id": "0",
-                "subtask_id": "0",
+                "task_id": str(submission),
+                "subtask_id": str(submission),
                 "subtask_name": subtask_name,
-                "file": normalized,
-                "url": f"ftp://{normalized}",
+                "file": f"/{normalized}",
+                # P1/A1 firmware addresses local SD storage directly. Other
+                # families use an FTP URL with an absolute path, not a hostname.
+                "url": (f"file:///sdcard/{normalized}" if model.startswith(("P1", "A1"))
+                        else f"ftp:///{normalized}"),
                 "md5": "",
                 "timelapse": bool(timelapse),
                 "bed_type": "auto",
-                "bed_levelling": calibration_value(bed_leveling),
-                "auto_bed_leveling": calibration_value(bed_leveling),
+                "bed_leveling": bool(bed_leveling),
+                "auto_bed_leveling": int(bool(bed_leveling)),
                 "flow_cali": calibration_value(flow_calibration),
                 "vibration_cali": calibration_value(effective_vibration_cali),
                 "layer_inspect": calibration_value(layer_inspect),
-                "cfg": cfg or "",
-                "extrude_cali_flag": calibration_value(extrude_cali_flag),
-                "ams_mapping": cleaned_ams_mapping,
+                "extrude_cali_flag": int(bool(extrude_cali_flag)),
                 "use_ams": bool(use_ams),
             }
         }
+        if cleaned_ams_mapping is not None:
+            cmd["print"]["ams_mapping"] = cleaned_ams_mapping
         if cleaned_ams_mapping2 is not None:
             cmd["print"]["ams_mapping2"] = cleaned_ams_mapping2
 
         try:
-            await self.publish_command(cmd)
+            return await self._publish_print_start(cmd)
         except Exception as exc:
             return {"error": str(exc)}
 
-        return {"result": "ok"}
+    async def _publish_print_start(self, command):
+        """Publish once; require firmware acceptance, never replay a physical start.
+
+        Firmware acceptance is checked separately from broker PUBACK delivery;
+        neither timeout triggers replay of a physical start.
+        """
+        if self._mqtt_client is None:
+            return {"error": "Printer MQTT disconnected"}
+        command = self._inject_sequence_id(command)
+        fields = command["print"]
+        # Match the native Studio command window for project submissions.
+        fields["sequence_id"] = str(20000 + int(fields["sequence_id"]) % 10000)
+        print(f"Print-start request: {json.dumps(fields)}")
+        accepted = asyncio.get_running_loop().create_future()
+        self._pending_print_start = (fields["sequence_id"], accepted)
+
+        async def publish_once():
+            try:
+                await self._mqtt_client.publish(
+                    f"device/{self.serial}/request", json.dumps(command), qos=1, timeout=5,
+                )
+            except Exception as exc:
+                print(f"Print-start transport confirmation failed (not replaying): {exc}")
+
+        delivery = asyncio.create_task(publish_once())
+        try:
+            reply = await asyncio.wait_for(accepted, timeout=self._print_start_timeout)
+            if str(reply.get("result", "")).lower() != "success":
+                return {"error": f"Printer rejected print start: {reply.get('reason') or reply.get('result')}"}
+            return {"result": "ok"}
+        except TimeoutError:
+            detail = f" Native printer error: 0x{self._native_print_error:08X}." if self._native_print_error else ""
+            return {"error": "Printer did not acknowledge print start; request was not replayed." + detail + " Check printer state before retrying."}
+        finally:
+            delivery.cancel()
+            await asyncio.gather(delivery, return_exceptions=True)
+            self._pending_print_start = None
 
     @staticmethod
     def _subtask_name(filename: str) -> str:
@@ -815,14 +927,19 @@ class BambuClient:
         return filename
 
     @staticmethod
-    def _normalize_ams_mapping(ams_mapping: Any) -> str:
+    def _normalize_ams_mapping(ams_mapping: Any) -> Optional[List[int]]:
         if ams_mapping is None:
-            return ""
+            return None
         if isinstance(ams_mapping, str):
-            return ams_mapping
-        if isinstance(ams_mapping, (list, tuple)):
-            return ",".join(str(item) for item in ams_mapping)
-        return str(ams_mapping)
+            ams_mapping = ams_mapping.strip()
+            if not ams_mapping:
+                return None
+            ams_mapping = json.loads(ams_mapping) if ams_mapping.startswith("[") else ams_mapping.split(",")
+        if not isinstance(ams_mapping, (list, tuple)):
+            raise ValueError("Invalid AMS mapping")
+        if any(isinstance(item, bool) or not str(item).strip().lstrip('-').isdigit() for item in ams_mapping):
+            raise ValueError("Invalid tray ID")
+        return [int(item) for item in ams_mapping]
 
     @staticmethod
     def _normalize_ams_mapping2(ams_mapping2: Any) -> Optional[List[Dict[str, int]]]:
