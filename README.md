@@ -1,4 +1,6 @@
-# Bambu Moonraker Shim
+# Shambu
+
+**Bambu Moonraker Shim** · A friendly Moonraker imposter.
 
 An experimental LAN bridge between Bambu Lab printers and Moonraker clients such as Mainsail and Fluidd. It translates a subset of Moonraker requests into Bambu MQTT and FTPS operations without installing Klipper or replacing printer firmware.
 
@@ -7,6 +9,8 @@ The current development printer is a **P1S**. Model-specific code exists for oth
 > This project is unofficial and unsupported by Bambu Lab. Printer firmware changes may break it. It is provided without warranty; physical controls require validation on your printer.
 
 ![Shambu](docs/screenshot.png)
+
+[Explore the Shambu project page](https://justinh-rahb.github.io/bambu-moonraker-shim/) · [Page source and local preview](docs/README.md)
 
 ## Current status
 
@@ -24,7 +28,7 @@ The current development printer is a **P1S**. Model-specific code exists for oth
 | File metadata and previews | Parse sliced 3MF and common plain G-code comments; persist previews in SQLite | Benchy archive verified locally and stored printer files verified through read-only FTPS; missing fields are omitted. See format and cache limits below. |
 | History | Persistent terminal job records and progress estimates | Active jobs do not survive shim restarts intact. Filament consumption derived from progress remains an estimate. |
 
-The Docker image bundles **Mainsail 2.19.0**, Fluidd, moonraker-cnc, the shim and Nginx. Mainsail has a build-time patch for 3MF files. Fluidd and CNC are fetched from their configured upstream URLs; their default references are not pinned to releases.
+The Docker image bundles **Mainsail 2.19.0**, Fluidd, Retrograde, the shim and Nginx. Mainsail has a build-time patch for 3MF files. Fluidd and Retrograde are fetched from their configured upstream URLs; their default references are not pinned to releases.
 
 ## Quick start with Docker
 
@@ -69,7 +73,7 @@ docker run -d \
 | --- | --- |
 | Mainsail | <http://localhost:8080> |
 | Fluidd | <http://localhost:8081> |
-| moonraker-cnc | <http://localhost:8082> |
+| Retrograde | <http://localhost:8082> |
 | Moonraker-compatible API | <http://localhost:7125> |
 
 The bundled UIs connect through Nginx. Port 7125 provides direct API access for other clients and the configuration helper below. Docker's supervisor fixes the internal API port at 7125; `HTTP_PORT` only changes the `python main.py` development server.

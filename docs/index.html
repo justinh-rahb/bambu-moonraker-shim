@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#101713">
+<meta name="description" content="Shambu is an experimental LAN bridge that brings Bambu Lab printers to Moonraker clients such as Mainsail and Fluidd. Familiar tools, original firmware.">
+<meta property="og:title" content="Shambu — Your Bambu. Your familiar tools.">
+<meta property="og:description" content="A little shim between two worlds. Connect a Bambu Lab printer to Moonraker clients over your LAN.">
+<meta property="og:type" content="website">
+<title>Shambu — Bambu meets Moonraker</title>
+<link rel="icon" href="assets/shambu.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script src="script.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="wrap header">
+<a class="brand" href="#" aria-label="Shambu home"><img src="assets/shambu.svg" alt="" width="34" height="34">SHAMBU<span class="brand-note">a little impersonation.</span></a>
+<nav aria-label="Main navigation"><a href="#bridge">The bridge</a><a href="#inside">What's inside</a><a href="#status">Status</a><a href="#install">Get started</a><a href="https://github.com/justinh-rahb/bambu-moonraker-shim">GitHub ↗</a></nav>
+</header>
+<main id="main">
+<section class="wrap hero" aria-labelledby="hero-title">
+<div class="hero-copy"><p class="eyebrow"><span class="dot"></span> BAMBU HARDWARE / MOONRAKER LANGUAGE</p>
+<h1 id="hero-title">Your Bambu.<br><em>Your familiar tools.</em></h1>
+<p class="intro">A little shim between two worlds. Shambu connects Bambu Lab printers to Moonraker clients like Mainsail and Fluidd, right on your LAN.</p>
+<div class="actions"><a class="button" href="#install">Build your bridge <span>↓</span></a><a class="text-link" href="https://github.com/justinh-rahb/bambu-moonraker-shim">Explore the source ↗</a></div>
+<p class="micro">Python · Docker · MIT licensed <span>/</span> Experimental</p></div>
+<div class="bridge-visual" aria-label="Shambu translates Moonraker HTTP and WebSocket requests into Bambu MQTT and FTPS operations">
+<div class="diagram-top"><span>01 / THE TRANSLATION LAYER</span><span class="local">● LAN</span></div>
+<div class="endpoint"><span class="endpoint-icon">{ }</span><div><strong>Your favourite interface</strong><span>Mainsail · Fluidd · Moonraker clients</span></div></div>
+<div class="wire"><span>HTTP / WEBSOCKET</span><i>↓ ↑</i></div>
+<div class="shim"><img src="assets/shambu.svg" width="46" height="46" alt=""><div><strong>shambu</strong><span>speaks a little of both.</span></div><span class="translate">⇄</span></div>
+<div class="wire"><span>MQTT / FTPS</span><i>↓ ↑</i></div>
+<div class="endpoint"><span class="endpoint-icon printer-icon">▤</span><div><strong>Your Bambu Lab printer</strong><span>Original firmware · local connection</span></div></div>
+<div class="diagram-bottom">A Moonraker-compatible API. A Bambu underneath.</div>
+</div>
+</section>
+<div class="wrap facts"><div><span>01</span><p><strong>Stays on your LAN</strong>Direct MQTT and FTPS connections.</p></div><div><span>02</span><p><strong>Keeps your firmware</strong>Runs alongside the printer, in Docker.</p></div><div><span>03</span><p><strong>Brings familiar interfaces</strong>Mainsail, Fluidd and Retrograde bundled.</p></div></div>
+<section class="wrap section dashboard" aria-labelledby="dashboard-title">
+<div class="section-heading"><div><p class="eyebrow">THE VIEW FROM THIS SIDE</p><h2 id="dashboard-title">Well, this looks familiar.</h2></div><p>A Bambu printer, seen through Mainsail.<br>The interface you know, with a new translator underneath.</p></div>
+<figure class="screenshot"><div class="window-bar"><span><i></i><i></i><i></i> shambu / mainsail</span><a href="assets/dashboard.jpg" target="_blank" rel="noopener">Open full size ↗</a></div><a href="assets/dashboard.jpg" target="_blank" rel="noopener" aria-label="Enlarge the Shambu Mainsail dashboard screenshot"><img src="assets/dashboard.jpg" width="1902" height="1616" loading="lazy" alt="Mainsail connected through Shambu, showing a Bambu printer camera, temperatures, toolhead controls, fans and console."></a><figcaption>Captured from the local P1S dashboard, still named Fakeraker in this instance. See validation status below for control support.</figcaption></figure>
+</section>
+<section class="wrap section" id="bridge" aria-labelledby="bridge-title">
+<div class="section-heading"><div><p class="eyebrow">A SMALL BRIDGE, ON PURPOSE</p><h2 id="bridge-title">Bambu on one side.<br>Moonraker on the other.</h2></div><p>Shambu translates a subset of Moonraker requests into Bambu operations. It runs on a computer that can reach your printer, exposing an API on port <code>7125</code>.</p></div>
+<div class="explanation"><p>Monitoring, files, camera streams and settings can live in a familiar dashboard. The shim handles the protocol differences behind the scenes.</p><p>It does not install Klipper, replace Bambu firmware or turn the printer into a Klipper machine. Existing Klipper macros and slicer profiles are not automatically compatible.</p></div>
+</section>
+<section class="wrap section" id="inside" aria-labelledby="inside-title">
+<p class="eyebrow">WHAT'S INSIDE</p><h2 id="inside-title">The useful bits, brought together.</h2>
+<div class="features">
+<article><span class="feature-no">01 / OBSERVE</span><h3>A window into your printer</h3><p>Temperatures, print state, progress and filenames over LAN MQTT. A shared P1-style camera connection provides MJPEG streams and snapshots.</p><span class="feature-foot">Monitoring and camera observed on P1S</span></article>
+<article><span class="feature-no">02 / BROWSE</span><h3>Files that keep their names</h3><p>Browse printer files over FTPS, with real <code>.gcode.3mf</code> filenames. The bundled Mainsail build includes a durable 3MF compatibility patch.</p><span class="feature-foot">Listing · upload · download · delete paths</span></article>
+<article><span class="feature-no">03 / INSPECT</span><h3>A preview before the print</h3><p>Read embedded thumbnails and slicer estimates from sliced 3MF and common G-code formats. Missing fields stay missing, with previews cached in SQLite.</p><span class="feature-foot">Metadata · thumbnails · plate selection</span></article>
+<article><span class="feature-no">04 / REMEMBER</span><h3>A dashboard that remembers</h3><p>UI preferences, webcams, external-spool metadata and terminal job records persist in SQLite through a Moonraker-compatible database API.</p><span class="feature-foot">HTTP + WebSocket settings persistence</span></article>
+</div>
+</section>
+<section class="status-section" id="status" aria-labelledby="status-title"><div class="wrap section">
+<div class="section-heading"><div><p class="eyebrow amber">WORK IN PROGRESS, OUT IN THE OPEN</p><h2 id="status-title">A shim. With honest edges.</h2></div><p>The development printer is a P1S. A code path or a passing mock test is only part of the story; physical behaviour needs observation.</p></div>
+<div class="status-row"><span class="status-label observed">Observed / verified</span><p>LAN monitoring and the P1S camera path. Settings persistence. File listing, metadata and previews. Validation details live in the README.</p></div>
+<div class="status-row"><span class="status-label pending">Needs validation</span><p>Remote print start remains unresolved on the observed P1S firmware. Heater semantics, motion and other controls need further hardware acceptance testing.</p></div>
+<div class="status-row"><span class="status-label limited">Known limits</span><p>A subset of Moonraker, fixed macro handlers, and incomplete model coverage. No general Klipper/Jinja macro engine or validated AMS/AFC UI integration.</p></div>
+<a class="text-link status-link" href="https://github.com/justinh-rahb/bambu-moonraker-shim#current-status">Read the full compatibility and validation notes ↗</a>
+</div></section>
+<section class="wrap section" id="install" aria-labelledby="install-title">
+<div class="section-heading"><div><p class="eyebrow">GET STARTED</p><h2 id="install-title">One container.<br>Three ways to look in.</h2></div><p>You'll need Docker, a printer reachable from the container, its serial number and its LAN access code. Start with the documented LAN-mode setup.</p></div>
+<div class="install-grid"><div class="steps"><div><span>01</span><div><h3>Get the source</h3><p>Clone the repository and open its directory.</p></div></div><div><span>02</span><div><h3>Add your printer</h3><p>Create <code>.env</code> with your host, access code, serial and model. Follow the <a href="https://github.com/justinh-rahb/bambu-moonraker-shim#quick-start-with-docker">configuration example ↗</a>.</p></div></div><div><span>03</span><div><h3>Build and launch</h3><p>Create the persistence files, build the image and run it using the documented port and volume mappings.</p></div></div></div>
+<div class="terminal"><div class="window-bar"><span>TERMINAL / GET THE SOURCE</span><button type="button" data-copy="clone" aria-label="Copy clone commands">Copy <span aria-hidden="true">⧉</span></button></div><pre><code id="clone">git clone https://github.com/justinh-rahb/bambu-moonraker-shim.git
+cd bambu-moonraker-shim</code></pre><div class="terminal-note">Next: configure <code>.env</code> before building or running.</div><a class="install-docs" href="https://github.com/justinh-rahb/bambu-moonraker-shim#quick-start-with-docker">Continue with the Docker setup <span>↗</span></a></div></div>
+<div class="ports" aria-label="Default services and host ports"><div><span>8080</span><strong>Mainsail</strong><small>Patched for 3MF</small></div><div><span>8081</span><strong>Fluidd</strong><small>Alternative web interface</small></div><div><span>8082</span><strong>Retrograde</strong><small>Bundled web interface</small></div><div><span>7125</span><strong>Shim API</strong><small>Moonraker-compatible</small></div></div>
+<p class="install-note">Intended for a trusted LAN; the API currently has no authentication. This unofficial project is unsupported by Bambu Lab, and firmware changes may affect compatibility.</p>
+<details><summary>Want to explore without a printer?</summary><p>Mock mode simulates printer state with local file operations. The README includes a separate container command that clears printer credentials and disables the camera. Mock behaviour does not validate physical controls.</p><a class="text-link" href="https://github.com/justinh-rahb/bambu-moonraker-shim#mock-mode">Run the mock example ↗</a></details>
+<details><summary>Prefer to run Python directly?</summary><p>The shim can run with Python 3.11 and the repository's requirements. You'll need a separately hosted UI; the Python server serves the API. The bundled Mainsail patch is applied by the Docker build.</p><a class="text-link" href="https://github.com/justinh-rahb/bambu-moonraker-shim#running-the-python-server-directly">Python setup instructions ↗</a></details>
+</section>
+<section class="wrap project-cta"><div><p class="eyebrow">OPEN SOURCE / MIT</p><h2>A friendly Moonraker imposter.</h2><p>Printer quirks, careful testing and contributions welcome.</p></div><a class="button" href="https://github.com/justinh-rahb/bambu-moonraker-shim">Meet Shambu on GitHub <span>↗</span></a></section>
+</main>
+<footer class="wrap footer"><a class="brand" href="#">SHAMBU</a><p>Bambu hardware. A little Moonraker make-believe.</p><div><a href="https://justinh-rahb.github.io/retrograde/">Retrograde ↗</a><a href="https://justinh-rahb.github.io/moontop/">Moontop ↗</a><a href="https://github.com/justinh-rahb/bambu-moonraker-shim/blob/master/LICENSE">MIT ↗</a></div></footer>
+<p id="copy-status" class="sr-only" role="status" aria-live="polite"></p>
+</body>
+</html>
